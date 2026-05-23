@@ -10,3 +10,6 @@
 [submodule "src/Mod/AddonManager"]
 	path = src/Mod/AddonManager
 	url = https://github.com/FreeCAD/AddonManager.git
+[submodule "src/Mod/GenCAD"]
+	path = src/Mod/GenCAD
+	url = git@github.com:ricjo4w/GenCAD.git
