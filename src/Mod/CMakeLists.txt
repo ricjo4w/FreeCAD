@@ -66,6 +66,10 @@ if(BUILD_PART_DESIGN)
   add_subdirectory(PartDesign)
 endif(BUILD_PART_DESIGN)
 
+if(BUILD_GENCAD)
+  add_subdirectory(GenCAD)
+endif(BUILD_GENCAD)
+
 if(BUILD_CAM)
     add_subdirectory(CAM)
 endif(BUILD_CAM)
