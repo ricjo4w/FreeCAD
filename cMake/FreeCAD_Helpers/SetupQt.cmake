@@ -32,6 +32,10 @@ if(BUILD_GUI)
     if(BUILD_DESIGNER_PLUGIN)
         list (APPEND FREECAD_QT_COMPONENTS Designer)
     endif()
+
+    #if(BUILD_GENCAD)
+    #    list (APPEND FREECAD_QT_COMPONENTS Quick QuickWidgets QuickControls2)
+    #endif()
 endif()
 
 if (ENABLE_DEVELOPER_TESTS)
