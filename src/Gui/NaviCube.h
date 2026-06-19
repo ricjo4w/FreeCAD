@@ -26,6 +26,8 @@
 #include <QColor>
 #include <FCGlobal.h>
 
+#include "Inventor/SoNaviCube.h"
+
 class SoEvent;
 class SoNode;
 
@@ -74,6 +76,7 @@ public:
     static void setNaviCubeCommands(const std::vector<std::string>& cmd);
     static int getNaviCubeSize();
     SoNode* getCoinNode() const;
+    SbRotation orientationForFace(Gui::SoNaviCube::PickId id, bool rotateToNearest = false) const;
 
 private:
     NaviCubeImplementation* m_NaviCubeImplementation;

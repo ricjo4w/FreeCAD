@@ -93,6 +93,8 @@ int getPickingFramebufferExtent(qreal physicalCubeWidgetSize)
 
 class NaviCubeImplementation
 {
+    friend class NaviCube;
+
 public:
     explicit NaviCubeImplementation(Gui::View3DInventorViewer*);
     ~NaviCubeImplementation();
@@ -216,6 +218,12 @@ int NaviCube::getNaviCubeSize()
 SoNode* NaviCube::getCoinNode() const
 {
     return m_NaviCubeImplementation->getCoinNode();
+}
+
+SbRotation NaviCube::orientationForFace(Gui::SoNaviCube::PickId id, bool rotateToNearest) const
+{
+    return rotateToNearest ? m_NaviCubeImplementation->getNearestOrientation(id)
+                           : m_NaviCubeImplementation->getFaceRotation(id);
 }
 
 NaviCube::NaviCube(Gui::View3DInventorViewer* viewer)
