@@ -663,8 +663,6 @@ def validate_checked_examples(
     metadata_documents: list[dict[str, Any]],
     examples_path: Path | None,
 ) -> None:
-    if examples_path is None:
-        return
     for metadata_index, metadata in enumerate(metadata_documents):
         location = f"metadata[{metadata_index}]"
         for index, record in enumerate(metadata_records(metadata, "examples", location)):
@@ -673,6 +671,10 @@ def validate_checked_examples(
             checks = set(require_string_list(record, "checks", record_location))
             if not required:
                 continue
+            if examples_path is None:
+                raise DocumentationSchemaError(
+                    f"{record_location} required example needs --checked-examples"
+                )
             unsupported_checks = checks.difference({"syntax"})
             if unsupported_checks:
                 raise DocumentationSchemaError(

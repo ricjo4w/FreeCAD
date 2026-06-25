@@ -448,6 +448,29 @@ def sparse(name): ...
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected, result.stderr)
 
+    def test_validate_docs_fails_when_required_checked_example_has_no_examples_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            normalized = self.write_normalized_json(root)
+            metadata = self.write_metadata(
+                root,
+                {
+                    "examples": [
+                        {
+                            "path": "missing.py",
+                            "symbols": ["FreeCAD.openDocument"],
+                            "required": True,
+                            "checks": ["syntax"],
+                        }
+                    ]
+                },
+            )
+
+            result = self.run_cli("validate-docs", str(normalized), "--metadata", str(metadata))
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("required example needs --checked-examples", result.stderr)
+
     def test_validate_docs_fails_on_runtime_conflict_without_exception(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
