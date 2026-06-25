@@ -29,9 +29,11 @@ from .doc_pipeline import (
     agent_api_index,
     inventory_public_stub_modules,
     load_json,
+    load_metadata_document,
     normalized_model,
     quality_report,
     render_sphinx_rst,
+    validate_documentation_inputs,
     validate_documentation_json,
     write_json,
 )
@@ -179,7 +181,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser = argparse.ArgumentParser(
             description="Validate generated Python API documentation JSON."
         )
-        parser.add_argument("json_path", type=Path, help="Generated documentation JSON to validate.")
+        parser.add_argument(
+            "json_path",
+            type=Path,
+            help="Generated documentation JSON to validate.",
+        )
+        parser.add_argument(
+            "--metadata",
+            action="append",
+            type=Path,
+            default=[],
+            help="Curated JSON-compatible YAML metadata file to validate against the JSON.",
+        )
+        parser.add_argument(
+            "--checked-examples",
+            type=Path,
+            default=None,
+            help="Directory containing required checked examples referenced by metadata.",
+        )
+        parser.add_argument(
+            "--runtime-inventory",
+            type=Path,
+            default=None,
+            help="Runtime inventory JSON used to detect documented/runtime kind conflicts.",
+        )
+        parser.add_argument(
+            "--accepted-exceptions",
+            action="append",
+            type=Path,
+            default=[],
+            help="JSON-compatible YAML file listing accepted runtime metadata exceptions.",
+        )
         parser.set_defaults(command="validate-docs")
         return parser.parse_args(argv[1:])
 
@@ -384,12 +416,32 @@ def run_generate_docs(args: argparse.Namespace) -> int:
 def run_validate_docs(args: argparse.Namespace) -> int:
     try:
         payload = load_json(args.json_path)
-        validate_documentation_json(payload)
+        metadata_documents = [
+            load_metadata_document(path) for path in getattr(args, "metadata", [])
+        ]
+        accepted_exceptions = [
+            load_metadata_document(path)
+            for path in getattr(args, "accepted_exceptions", [])
+        ]
+        runtime_inventory = (
+            load_json(args.runtime_inventory)
+            if getattr(args, "runtime_inventory", None)
+            else None
+        )
+        result = validate_documentation_inputs(
+            payload,
+            metadata_documents=metadata_documents,
+            checked_examples_path=getattr(args, "checked_examples", None),
+            runtime_inventory=runtime_inventory,
+            accepted_exceptions=accepted_exceptions,
+        )
     except DocumentationSchemaError as exc:
         print_stderr(f"{exc}\n")
         return 1
 
     print(f"Validated {args.json_path}")
+    for gap in result.completeness_gaps:
+        print(f"Completeness gap: {gap}")
     return 0
 
 

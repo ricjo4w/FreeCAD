@@ -35,10 +35,18 @@ QUALITY_REPORT_NAME = "documentation-quality-report.md"
 SPHINX_SUBTREE = Path("sphinx") / "python_api"
 
 CompletenessState = str
+VALID_COMPLETENESS_STATES = frozenset(
+    {"documented", "missing", "typed", "discovered", "partial"}
+)
 
 
 class DocumentationSchemaError(ValueError):
     """Raised when a generated documentation JSON file violates its schema."""
+
+
+@dataclass(frozen=True)
+class DocumentationValidationResult:
+    completeness_gaps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -400,6 +408,22 @@ def load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def load_metadata_document(path: Path) -> dict[str, Any]:
+    """Load CI validation metadata.
+
+    The curated metadata files used by this early pipeline slice are restricted
+    to JSON-compatible YAML. JSON is accepted directly, which keeps validation
+    dependency-free while still allowing the files to move to fuller YAML later.
+    """
+
+    try:
+        return load_json(path)
+    except DocumentationSchemaError as exc:
+        raise DocumentationSchemaError(
+            f"{path}: invalid JSON-compatible YAML metadata: {exc}"
+        ) from exc
+
+
 def require_string(container: dict[str, Any], key: str, location: str) -> None:
     if not isinstance(container.get(key), str):
         raise DocumentationSchemaError(f"{location}.{key} must be a string")
@@ -409,6 +433,32 @@ def require_object(container: dict[str, Any], key: str, location: str) -> dict[s
     value = container.get(key)
     if not isinstance(value, dict):
         raise DocumentationSchemaError(f"{location}.{key} must be an object")
+    return value
+
+
+def require_bool(container: dict[str, Any], key: str, location: str) -> bool:
+    value = container.get(key)
+    if not isinstance(value, bool):
+        raise DocumentationSchemaError(f"{location}.{key} must be a boolean")
+    return value
+
+
+def require_string_list(container: dict[str, Any], key: str, location: str) -> list[str]:
+    value = container.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise DocumentationSchemaError(f"{location}.{key} must be a list of strings")
+    return value
+
+
+def require_completeness(value: Any, location: str) -> str:
+    if not isinstance(value, str):
+        raise DocumentationSchemaError(f"{location} must be a string")
+    if value not in VALID_COMPLETENESS_STATES:
+        allowed = ", ".join(sorted(VALID_COMPLETENESS_STATES))
+        raise DocumentationSchemaError(
+            f"{location} has invalid completeness value {value!r}; "
+            f"expected one of {allowed}"
+        )
     return value
 
 
@@ -425,7 +475,7 @@ def validate_normalized_model(model: dict[str, Any]) -> None:
         if not isinstance(module, dict):
             raise DocumentationSchemaError(f"{location} must be an object")
         require_string(module, "name", location)
-        require_string(module, "completeness", location)
+        require_completeness(module.get("completeness"), f"{location}.completeness")
         members = module.get("members")
         if not isinstance(members, list):
             raise DocumentationSchemaError(f"{location}.members must be a list")
@@ -435,6 +485,9 @@ def validate_normalized_model(model: dict[str, Any]) -> None:
                 raise DocumentationSchemaError(f"{member_location} must be an object")
             for key in ("name", "qualified_name", "kind", "signature", "completeness"):
                 require_string(member, key, member_location)
+            require_completeness(
+                member.get("completeness"), f"{member_location}.completeness"
+            )
             require_object(member, "source", member_location)
 
 
@@ -453,7 +506,307 @@ def validate_agent_api_index(index: dict[str, Any]) -> None:
             raise DocumentationSchemaError(f"{location} must be an object")
         for key in ("qualified_name", "kind", "signature", "completeness"):
             require_string(symbol, key, location)
+        require_completeness(symbol.get("completeness"), f"{location}.completeness")
         require_object(symbol, "source", location)
+
+
+def model_facts(payload: dict[str, Any]) -> tuple[set[str], dict[str, str]]:
+    validate_documentation_json(payload)
+    modules: set[str] = set()
+    symbols: dict[str, str] = {}
+    if payload.get("schema_version") == NORMALIZED_SCHEMA_VERSION:
+        for module in payload.get("modules", []):
+            modules.add(module["name"])
+            for member in module.get("members", []):
+                symbols[member["qualified_name"]] = member["kind"]
+    else:
+        for symbol in payload.get("symbols", []):
+            qualified_name = symbol["qualified_name"]
+            modules.add(qualified_name.split(".", 1)[0])
+            symbols[qualified_name] = symbol["kind"]
+    return modules, symbols
+
+
+def metadata_records(
+    metadata: dict[str, Any],
+    key: str,
+    location: str,
+) -> list[dict[str, Any]]:
+    value = metadata.get(key, [])
+    if not isinstance(value, list):
+        raise DocumentationSchemaError(f"{location}.{key} must be a list")
+    records: list[dict[str, Any]] = []
+    for index, record in enumerate(value):
+        if not isinstance(record, dict):
+            raise DocumentationSchemaError(f"{location}.{key}[{index}] must be an object")
+        records.append(record)
+    return records
+
+
+def validate_symbol_reference(
+    qualified_name: str,
+    symbols: dict[str, str],
+    location: str,
+) -> None:
+    if qualified_name not in symbols:
+        raise DocumentationSchemaError(
+            f"{location} references unknown symbol {qualified_name!r}"
+        )
+
+
+def validate_curated_metadata(
+    metadata: dict[str, Any],
+    *,
+    modules: set[str],
+    symbols: dict[str, str],
+    location: str,
+) -> tuple[set[str], set[str], list[str]]:
+    metadata_symbol_names: set[str] = set()
+    example_names: set[str] = set()
+    object_type_names: set[str] = set()
+    workbench_names: set[str] = set()
+    gaps: list[str] = []
+
+    for index, record in enumerate(metadata_records(metadata, "examples", location)):
+        record_location = f"{location}.examples[{index}]"
+        path = record.get("path")
+        if not isinstance(path, str) or not path:
+            raise DocumentationSchemaError(f"{record_location}.path must be a non-empty string")
+        example_names.add(path)
+        require_string_list(record, "symbols", record_location)
+        for symbol_name in record.get("symbols", []):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+        if "required" in record:
+            require_bool(record, "required", record_location)
+        require_string_list(record, "checks", record_location)
+
+    for index, record in enumerate(metadata_records(metadata, "object_types", location)):
+        record_location = f"{location}.object_types[{index}]"
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        object_type_names.add(name)
+        if name in symbols and symbols[name] != "class":
+            raise DocumentationSchemaError(f"{record_location}.name must reference a class symbol")
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+
+    for index, record in enumerate(metadata_records(metadata, "workbenches", location)):
+        record_location = f"{location}.workbenches[{index}]"
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        workbench_names.add(name)
+        for module_name in require_string_list(record, "modules", record_location):
+            if module_name not in modules:
+                raise DocumentationSchemaError(
+                    f"{record_location}.modules references unknown module {module_name!r}"
+                )
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+        for object_type in require_string_list(record, "object_types", record_location):
+            if object_type not in object_type_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.object_types references unknown object type {object_type!r}"
+                )
+
+    for index, record in enumerate(metadata_records(metadata, "symbols", location)):
+        record_location = f"{location}.symbols[{index}]"
+        qualified_name = record.get("qualified_name")
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise DocumentationSchemaError(
+                f"{record_location}.qualified_name must be a non-empty string"
+            )
+        metadata_symbol_names.add(qualified_name)
+        validate_symbol_reference(qualified_name, symbols, f"{record_location}.qualified_name")
+        if "completeness" in record:
+            completeness = require_completeness(
+                record.get("completeness"), f"{record_location}.completeness"
+            )
+            if completeness in {"missing", "discovered"}:
+                gaps.append(f"{qualified_name}: {completeness}")
+        for example_name in require_string_list(record, "examples", record_location):
+            if example_name not in example_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.examples references unknown example {example_name!r}"
+                )
+        for object_type in require_string_list(record, "object_types", record_location):
+            if object_type not in object_type_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.object_types references unknown object type {object_type!r}"
+                )
+        for workbench_name in require_string_list(record, "workbenches", record_location):
+            if workbench_name not in workbench_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.workbenches references unknown workbench {workbench_name!r}"
+                )
+
+    for index, record in enumerate(metadata_records(metadata, "completeness", location)):
+        record_location = f"{location}.completeness[{index}]"
+        qualified_name = record.get("qualified_name")
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise DocumentationSchemaError(
+                f"{record_location}.qualified_name must be a non-empty string"
+            )
+        validate_symbol_reference(qualified_name, symbols, f"{record_location}.qualified_name")
+        state = require_completeness(record.get("state"), f"{record_location}.state")
+        if state in {"missing", "discovered"}:
+            gaps.append(f"{qualified_name}: {state}")
+        if "reason" in record:
+            require_string(record, "reason", record_location)
+
+    metadata_records(metadata, "runtime_exceptions", location)
+    return metadata_symbol_names, example_names, gaps
+
+
+def validate_checked_examples(
+    metadata_documents: list[dict[str, Any]],
+    examples_path: Path | None,
+) -> None:
+    if examples_path is None:
+        return
+    for metadata_index, metadata in enumerate(metadata_documents):
+        location = f"metadata[{metadata_index}]"
+        for index, record in enumerate(metadata_records(metadata, "examples", location)):
+            record_location = f"{location}.examples[{index}]"
+            required = bool(record.get("required", False))
+            checks = set(require_string_list(record, "checks", record_location))
+            if not required:
+                continue
+            unsupported_checks = checks.difference({"syntax"})
+            if unsupported_checks:
+                raise DocumentationSchemaError(
+                    f"{record_location}.checks contains unsupported checks: "
+                    f"{sorted(unsupported_checks)}"
+                )
+            example = Path(record["path"])
+            path = example if example.is_absolute() else examples_path / example
+            if not path.exists():
+                raise DocumentationSchemaError(
+                    f"{record_location} required example is missing: {path}"
+                )
+            if "syntax" in checks:
+                try:
+                    ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                except SyntaxError as exc:
+                    raise DocumentationSchemaError(
+                        f"{record_location} required example failed syntax check: {exc}"
+                    ) from exc
+
+
+def exception_records(
+    metadata_documents: list[dict[str, Any]],
+    accepted_exceptions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for metadata_index, metadata in enumerate(metadata_documents):
+        records.extend(
+            metadata_records(
+                metadata, "runtime_exceptions", f"metadata[{metadata_index}]"
+            )
+        )
+    for exception_index, metadata in enumerate(accepted_exceptions):
+        if "runtime_exceptions" in metadata:
+            records.extend(
+                metadata_records(
+                    metadata,
+                    "runtime_exceptions",
+                    f"accepted_exceptions[{exception_index}]",
+                )
+            )
+            continue
+        if not isinstance(metadata.get("exceptions", []), list):
+            raise DocumentationSchemaError(
+                f"accepted_exceptions[{exception_index}].exceptions must be a list"
+            )
+        records.extend(
+            metadata_records(
+                metadata, "exceptions", f"accepted_exceptions[{exception_index}]"
+            )
+        )
+    return records
+
+
+def runtime_exception_matches(
+    exception: dict[str, Any],
+    qualified_name: str,
+    runtime_kind: str,
+    documented_kind: str,
+) -> bool:
+    if exception.get("qualified_name") != qualified_name:
+        return False
+    expected_runtime = exception.get("runtime_kind")
+    expected_documented = exception.get("documented_kind")
+    return (
+        (expected_runtime is None or expected_runtime == runtime_kind)
+        and (expected_documented is None or expected_documented == documented_kind)
+    )
+
+
+def validate_runtime_inventory(
+    runtime_inventory: dict[str, Any] | None,
+    *,
+    symbols: dict[str, str],
+    exceptions: list[dict[str, Any]],
+) -> None:
+    if runtime_inventory is None:
+        return
+    runtime_symbols = runtime_inventory.get("symbols")
+    if not isinstance(runtime_symbols, list):
+        raise DocumentationSchemaError("runtime inventory symbols must be a list")
+    for index, record in enumerate(runtime_symbols):
+        location = f"runtime_inventory.symbols[{index}]"
+        if not isinstance(record, dict):
+            raise DocumentationSchemaError(f"{location} must be an object")
+        qualified_name = record.get("qualified_name")
+        runtime_kind = record.get("kind")
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise DocumentationSchemaError(f"{location}.qualified_name must be a non-empty string")
+        if not isinstance(runtime_kind, str) or not runtime_kind:
+            raise DocumentationSchemaError(f"{location}.kind must be a non-empty string")
+        documented_kind = symbols.get(qualified_name)
+        if documented_kind is None or documented_kind == runtime_kind:
+            continue
+        if any(
+            runtime_exception_matches(
+                exception, qualified_name, runtime_kind, documented_kind
+            )
+            for exception in exceptions
+        ):
+            continue
+        raise DocumentationSchemaError(
+            f"{location} runtime kind {runtime_kind!r} conflicts with documented kind "
+            f"{documented_kind!r} for {qualified_name!r}"
+        )
+
+
+def validate_documentation_inputs(
+    payload: dict[str, Any],
+    *,
+    metadata_documents: list[dict[str, Any]] | None = None,
+    checked_examples_path: Path | None = None,
+    runtime_inventory: dict[str, Any] | None = None,
+    accepted_exceptions: list[dict[str, Any]] | None = None,
+) -> DocumentationValidationResult:
+    modules, symbols = model_facts(payload)
+    metadata_documents = metadata_documents or []
+    accepted_exceptions = accepted_exceptions or []
+    gaps: list[str] = []
+    for index, metadata in enumerate(metadata_documents):
+        _, _, metadata_gaps = validate_curated_metadata(
+            metadata,
+            modules=modules,
+            symbols=symbols,
+            location=f"metadata[{index}]",
+        )
+        gaps.extend(metadata_gaps)
+    validate_checked_examples(metadata_documents, checked_examples_path)
+    validate_runtime_inventory(
+        runtime_inventory,
+        symbols=symbols,
+        exceptions=exception_records(metadata_documents, accepted_exceptions),
+    )
+    return DocumentationValidationResult(completeness_gaps=tuple(gaps))
 
 
 def surface_completeness_counts(model: dict[str, Any], source_surface: str) -> Counter[str]:
