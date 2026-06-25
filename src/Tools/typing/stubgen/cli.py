@@ -27,6 +27,7 @@ from .doc_pipeline import (
     QUALITY_REPORT_NAME,
     DocumentationSchemaError,
     agent_api_index,
+    collect_document_api_runtime_inventory,
     inventory_public_stub_modules,
     load_json,
     load_metadata_document,
@@ -238,6 +239,33 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             help="Optional FreeCADCmd executable for checked example smoke execution.",
         )
         parser.set_defaults(command="validate-docs")
+        return parser.parse_args(argv[1:])
+
+    if argv and argv[0] == "runtime-inventory":
+        parser = argparse.ArgumentParser(
+            description="Collect optional runtime inventory for Python API documentation."
+        )
+        parser.add_argument(
+            "--metadata",
+            action="append",
+            type=Path,
+            default=[],
+            required=True,
+            help="Curated JSON-compatible YAML metadata file to inventory at runtime.",
+        )
+        parser.add_argument(
+            "--out-file",
+            type=Path,
+            required=True,
+            help="Runtime inventory JSON output path.",
+        )
+        parser.add_argument(
+            "--freecad-executable",
+            type=Path,
+            default=None,
+            help="Optional FreeCADCmd executable used for runtime inventory collection.",
+        )
+        parser.set_defaults(command="runtime-inventory")
         return parser.parse_args(argv[1:])
 
     if argv and argv[0] == "report-docs":
@@ -477,6 +505,28 @@ def run_validate_docs(args: argparse.Namespace) -> int:
     print(f"Validated {args.json_path}")
     for gap in result.completeness_gaps:
         print(f"Completeness gap: {gap}")
+    for note in result.availability_notes:
+        print(f"Availability note: {note}")
+    return 0
+
+
+def run_runtime_inventory(args: argparse.Namespace) -> int:
+    try:
+        metadata_documents = [
+            load_metadata_document(path) for path in getattr(args, "metadata", [])
+        ]
+        inventory = collect_document_api_runtime_inventory(
+            metadata_documents,
+            freecad_executable=getattr(args, "freecad_executable", None),
+        )
+    except DocumentationSchemaError as exc:
+        print_stderr(f"{exc}\n")
+        return 1
+
+    out_file = args.out_file
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    write_json(out_file, inventory)
+    print(f"Wrote runtime inventory to {out_file}")
     return 0
 
 
@@ -505,6 +555,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_generate_docs(args)
     if args.command == "validate-docs":
         return run_validate_docs(args)
+    if args.command == "runtime-inventory":
+        return run_runtime_inventory(args)
     if args.command == "report-docs":
         return run_report_docs(args)
     return run_generate(args)

@@ -173,6 +173,7 @@ class DocumentObject:
     def __init__(self, name):
         self.Name = name
         self.Label = name
+        self.PropertiesList = ["Name", "Label"]
 
 
 class Document:
@@ -197,12 +198,47 @@ def newDocument(name):
 
 
 sys.modules["FreeCAD"] = types.SimpleNamespace(newDocument=newDocument)
-runpy.run_path(sys.argv[1], run_name="__main__")
+script_args = sys.argv[1:]
+sys.argv = script_args
+runpy.run_path(script_args[0], run_name="__main__")
 """,
             encoding="utf-8",
         )
         path.chmod(path.stat().st_mode | os.X_OK)
         return path
+
+    def write_document_api_availability_metadata(self, root: Path) -> Path:
+        return self.write_metadata(
+            root,
+            {
+                "document_api": {
+                    "objects": [
+                        {
+                            "name": "Part::Box",
+                            "properties": ["Name", "Label", "Length"],
+                            "completeness": "documented",
+                        }
+                    ],
+                    "properties": [
+                        {
+                            "name": "Name",
+                            "object_type": "Part::Box",
+                            "completeness": "documented",
+                        },
+                        {
+                            "name": "Label",
+                            "object_type": "Part::Box",
+                            "completeness": "documented",
+                        },
+                        {
+                            "name": "Length",
+                            "object_type": "Part::Box",
+                            "completeness": "documented",
+                        },
+                    ],
+                }
+            },
+        )
 
     def test_generate_docs_writes_model_index_rst_and_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -719,6 +755,135 @@ runpy.run_path(sys.argv[1], run_name="__main__")
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_validate_docs_fails_on_runtime_property_absence_without_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            normalized = self.write_normalized_json(root)
+            metadata = self.write_document_api_availability_metadata(root)
+            runtime_inventory = root / "runtime.json"
+            runtime_inventory.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "freecad-doc-runtime-inventory-v1",
+                        "document_api": {
+                            "objects": [
+                                {
+                                    "name": "Part::Box",
+                                    "available": True,
+                                    "properties": [
+                                        {"name": "Name", "available": True},
+                                        {"name": "Length", "available": False},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "validate-docs",
+                str(normalized),
+                "--metadata",
+                str(metadata),
+                "--runtime-inventory",
+                str(runtime_inventory),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Part::Box.Length is unavailable", result.stderr)
+
+    def test_validate_docs_accepts_runtime_property_absence_with_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            normalized = self.write_normalized_json(root)
+            metadata = self.write_document_api_availability_metadata(root)
+            runtime_inventory = root / "runtime.json"
+            runtime_inventory.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "freecad-doc-runtime-inventory-v1",
+                        "document_api": {
+                            "objects": [
+                                {
+                                    "name": "Part::Box",
+                                    "available": True,
+                                    "properties": [
+                                        {"name": "Length", "available": False},
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            exceptions = root / "exceptions.yaml"
+            exceptions.write_text(
+                json.dumps(
+                    {
+                        "runtime_exceptions": [
+                            {
+                                "object_type": "Part::Box",
+                                "property_name": "Length",
+                                "available": False,
+                                "reason": "Runtime fixture intentionally omits Length.",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "validate-docs",
+                str(normalized),
+                "--metadata",
+                str(metadata),
+                "--runtime-inventory",
+                str(runtime_inventory),
+                "--accepted-exceptions",
+                str(exceptions),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "Availability note: Document API runtime availability: property "
+                "Part::Box.Length is unavailable",
+                result.stdout,
+            )
+
+    def test_runtime_inventory_collects_document_api_object_property_availability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = self.write_document_api_availability_metadata(root)
+            out_file = root / "runtime.json"
+
+            result = self.run_cli(
+                "runtime-inventory",
+                "--metadata",
+                str(metadata),
+                "--out-file",
+                str(out_file),
+                "--freecad-executable",
+                str(self.write_fake_freecad_cmd(root)),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            inventory = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                inventory["schema_version"],
+                "freecad-doc-runtime-inventory-v1",
+            )
+            box = inventory["document_api"]["objects"][0]
+            self.assertEqual(box["name"], "Part::Box")
+            self.assertTrue(box["available"])
+            properties = {record["name"]: record for record in box["properties"]}
+            self.assertTrue(properties["Name"]["available"])
+            self.assertTrue(properties["Label"]["available"])
+            self.assertFalse(properties["Length"]["available"])
 
     def test_validate_docs_reports_completeness_gaps_without_failing(self):
         with tempfile.TemporaryDirectory() as tmp:
