@@ -27,6 +27,7 @@ from .doc_pipeline import (
     QUALITY_REPORT_NAME,
     DocumentationSchemaError,
     agent_api_index,
+    inventory_public_stub_modules,
     load_json,
     normalized_model,
     quality_report,
@@ -113,6 +114,15 @@ def add_generation_args(parser: argparse.ArgumentParser) -> None:
 
 def add_docs_source_args(parser: argparse.ArgumentParser) -> None:
     add_common_path_args(parser)
+    parser.add_argument(
+        "--stubs-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Generated public stub directory to inventory for documentation. "
+            f"Defaults to {DEFAULT_STUBS_OUT_DIR} when that directory exists."
+        ),
+    )
     parser.add_argument(
         "--out-dir",
         type=Path,
@@ -345,8 +355,10 @@ def run_generate_docs(args: argparse.Namespace) -> int:
         return 2
 
     out_dir = args.out_dir if args.out_dir.is_absolute() else root / args.out_dir
+    stubs_dir = resolve_optional_dir(root, args.stubs_dir, DEFAULT_STUBS_OUT_DIR)
     methods = collect_methods(root, source_dir)
-    model = normalized_model(methods)
+    public_stub_modules = inventory_public_stub_modules(stubs_dir) if stubs_dir else []
+    model = normalized_model(methods, public_stub_modules)
     validate_documentation_json(model)
 
     index = agent_api_index(model)
@@ -363,7 +375,8 @@ def run_generate_docs(args: argparse.Namespace) -> int:
 
     print(
         "Wrote documentation artifacts to "
-        f"{out_dir} ({len(methods)} registrations, {len(rst_paths)} RST files)"
+        f"{out_dir} ({len(methods)} registrations, "
+        f"{len(public_stub_modules)} public stub modules, {len(rst_paths)} RST files)"
     )
     return 0
 
