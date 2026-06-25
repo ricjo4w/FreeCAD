@@ -131,6 +131,25 @@ def add_docs_source_args(parser: argparse.ArgumentParser) -> None:
         required=True,
         help="Directory for generated documentation JSON, RST, and report artifacts.",
     )
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        type=Path,
+        default=[],
+        help="Curated JSON-compatible YAML metadata file to merge into generated docs.",
+    )
+    parser.add_argument(
+        "--checked-examples",
+        type=Path,
+        default=None,
+        help="Directory containing required checked examples referenced by metadata.",
+    )
+    parser.add_argument(
+        "--freecad-executable",
+        type=Path,
+        default=None,
+        help="Optional FreeCADCmd executable for checked example smoke execution.",
+    )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -211,6 +230,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             type=Path,
             default=[],
             help="JSON-compatible YAML file listing accepted runtime metadata exceptions.",
+        )
+        parser.add_argument(
+            "--freecad-executable",
+            type=Path,
+            default=None,
+            help="Optional FreeCADCmd executable for checked example smoke execution.",
         )
         parser.set_defaults(command="validate-docs")
         return parser.parse_args(argv[1:])
@@ -390,8 +415,17 @@ def run_generate_docs(args: argparse.Namespace) -> int:
     stubs_dir = resolve_optional_dir(root, args.stubs_dir, DEFAULT_STUBS_OUT_DIR)
     methods = collect_methods(root, source_dir)
     public_stub_modules = inventory_public_stub_modules(stubs_dir) if stubs_dir else []
-    model = normalized_model(methods, public_stub_modules)
+    metadata_documents = [
+        load_metadata_document(path) for path in getattr(args, "metadata", [])
+    ]
+    model = normalized_model(methods, public_stub_modules, metadata_documents)
     validate_documentation_json(model)
+    validate_documentation_inputs(
+        model,
+        metadata_documents=metadata_documents,
+        checked_examples_path=getattr(args, "checked_examples", None),
+        freecad_executable=getattr(args, "freecad_executable", None),
+    )
 
     index = agent_api_index(model)
     validate_documentation_json(index)
@@ -434,6 +468,7 @@ def run_validate_docs(args: argparse.Namespace) -> int:
             checked_examples_path=getattr(args, "checked_examples", None),
             runtime_inventory=runtime_inventory,
             accepted_exceptions=accepted_exceptions,
+            freecad_executable=getattr(args, "freecad_executable", None),
         )
     except DocumentationSchemaError as exc:
         print_stderr(f"{exc}\n")

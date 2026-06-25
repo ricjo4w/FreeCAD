@@ -20,7 +20,11 @@ import ast
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 from typing import Any
 
 from .discovery import group_methods
@@ -33,6 +37,15 @@ NORMALIZED_JSON_NAME = "normalized-documentation.json"
 AGENT_INDEX_JSON_NAME = "agent-api-index.json"
 QUALITY_REPORT_NAME = "documentation-quality-report.md"
 SPHINX_SUBTREE = Path("sphinx") / "python_api"
+DOCUMENT_API_RST_NAME = "document-api-tracer-path.rst"
+DOCUMENT_API_CATEGORIES = (
+    "modules",
+    "symbols",
+    "objects",
+    "properties",
+    "examples",
+    "anti_patterns",
+)
 
 CompletenessState = str
 VALID_COMPLETENESS_STATES = frozenset(
@@ -219,6 +232,7 @@ def inventory_public_stub_modules(stubs_dir: Path) -> list[StubModule]:
 def normalized_model(
     methods: list[BindingMethod],
     public_stub_modules: list[StubModule] | None = None,
+    metadata_documents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     module_methods, type_methods, unknown_methods = group_methods(methods)
     modules: dict[str, list[BindingMethod]] = defaultdict(list)
@@ -295,7 +309,7 @@ def normalized_model(
             }
         )
 
-    return {
+    model = {
         "schema_version": NORMALIZED_SCHEMA_VERSION,
         "metadata": {
             "generator": "src/Tools/typing/generate_stubs.py generate-docs",
@@ -303,6 +317,84 @@ def normalized_model(
         },
         "modules": normalized_modules,
     }
+    return apply_curated_metadata(model, metadata_documents or [])
+
+
+def symbol_lookup(model: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        member["qualified_name"]: member
+        for module in model.get("modules", [])
+        for member in module.get("members", [])
+    }
+
+
+def document_api_payload(metadata: dict[str, Any], location: str) -> dict[str, list[dict[str, Any]]]:
+    value = metadata.get("document_api", {})
+    if value == {}:
+        return {key: [] for key in DOCUMENT_API_CATEGORIES}
+    if not isinstance(value, dict):
+        raise DocumentationSchemaError(f"{location}.document_api must be an object")
+    payload: dict[str, list[dict[str, Any]]] = {}
+    for key in DOCUMENT_API_CATEGORIES:
+        payload[key] = metadata_records(value, key, f"{location}.document_api")
+    return payload
+
+
+def curated_entry(
+    record: dict[str, Any],
+    *,
+    category: str,
+    source_path: str,
+    known_symbols: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    entry = dict(record)
+    entry.setdefault("source_surface", "curated-metadata")
+    entry.setdefault("source", {"path": source_path, "line": 1})
+    entry.setdefault("completeness", "documented")
+
+    if category == "symbols":
+        qualified_name = entry.get("qualified_name")
+        symbol = known_symbols.get(qualified_name) if isinstance(qualified_name, str) else None
+        if symbol:
+            entry.setdefault("name", symbol["name"])
+            entry.setdefault("kind", symbol["kind"])
+            entry.setdefault("signature", symbol["signature"])
+            entry.setdefault("summary", symbol.get("summary", ""))
+        else:
+            entry.setdefault("name", qualified_name or "")
+            entry.setdefault("kind", "symbol")
+            entry.setdefault("signature", "")
+            entry.setdefault("summary", "")
+    return entry
+
+
+def apply_curated_metadata(
+    model: dict[str, Any],
+    metadata_documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not metadata_documents:
+        return model
+
+    known_symbols = symbol_lookup(model)
+    document_api = {key: [] for key in DOCUMENT_API_CATEGORIES}
+    for index, metadata in enumerate(metadata_documents):
+        source_path = str(metadata.get("source", f"metadata[{index}]"))
+        payload = document_api_payload(metadata, f"metadata[{index}]")
+        for category, records in payload.items():
+            document_api[category].extend(
+                curated_entry(
+                    record,
+                    category=category,
+                    source_path=source_path,
+                    known_symbols=known_symbols,
+                )
+                for record in records
+            )
+
+    if any(document_api.values()):
+        model = dict(model)
+        model["document_api"] = document_api
+    return model
 
 
 def agent_api_index(model: dict[str, Any]) -> dict[str, Any]:
@@ -321,11 +413,14 @@ def agent_api_index(model: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    return {
+    index: dict[str, Any] = {
         "schema_version": AGENT_INDEX_SCHEMA_VERSION,
         "source_schema_version": model["schema_version"],
         "symbols": sorted(symbols, key=lambda symbol: symbol["qualified_name"]),
     }
+    if model.get("document_api"):
+        index["document_api"] = model["document_api"]
+    return index
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -378,6 +473,12 @@ def render_sphinx_rst(model: dict[str, Any], out_dir: Path) -> list[Path]:
         path.write_text("\n".join(lines), encoding="utf-8")
         written.append(path)
 
+    if model.get("document_api"):
+        document_api_path = sphinx_dir / DOCUMENT_API_RST_NAME
+        document_api_path.write_text(render_document_api_rst(model), encoding="utf-8")
+        written.append(document_api_path)
+        module_pages.append(("Document API Tracer Path", DOCUMENT_API_RST_NAME))
+
     index_lines = rst_heading("FreeCAD Python API", "=")
     index_lines.extend(
         [
@@ -396,6 +497,66 @@ def render_sphinx_rst(model: dict[str, Any], out_dir: Path) -> list[Path]:
     index_path.write_text("\n".join(index_lines), encoding="utf-8")
     written.append(index_path)
     return written
+
+
+def render_field_list(record: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    lines: list[str] = []
+    for key in keys:
+        value = record.get(key)
+        if value in (None, "", []):
+            continue
+        title = key.replace("_", " ").title()
+        if isinstance(value, list):
+            rendered = ", ".join(f"``{item}``" for item in value)
+        else:
+            rendered = str(value)
+        lines.append(f":{title}: {rendered}")
+    if lines:
+        lines.append("")
+    return lines
+
+
+def render_document_api_rst(model: dict[str, Any]) -> str:
+    document_api = model.get("document_api", {})
+    lines = rst_heading("Document API Tracer Path", "=")
+    lines.extend([".. This file is generated from curated Document API metadata.", ""])
+
+    sections = (
+        ("Modules", "modules", ("name", "summary", "completeness")),
+        (
+            "Symbols",
+            "symbols",
+            ("qualified_name", "kind", "signature", "summary", "examples", "completeness"),
+        ),
+        ("Objects", "objects", ("name", "behavior", "symbols", "properties", "completeness")),
+        (
+            "Properties",
+            "properties",
+            ("name", "object_type", "behavior", "symbols", "completeness"),
+        ),
+        ("Checked Recipes", "examples", ("title", "path", "symbols", "checks", "completeness")),
+        ("Anti-Patterns", "anti_patterns", ("name", "summary", "guidance", "symbols")),
+    )
+    for title, key, fields in sections:
+        records = document_api.get(key, [])
+        if not records:
+            continue
+        lines.extend(rst_heading(title, "-"))
+        for record in records:
+            label = (
+                record.get("qualified_name")
+                or record.get("title")
+                or record.get("name")
+                or record.get("path")
+                or key
+            )
+            lines.extend(rst_heading(str(label), "~"))
+            lines.extend(render_field_list(record, fields))
+            path = record.get("path")
+            if isinstance(path, str) and path:
+                lines.append(f"Recipe file: ``{path}``")
+                lines.append("")
+    return "\n".join(lines)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -489,6 +650,8 @@ def validate_normalized_model(model: dict[str, Any]) -> None:
                 member.get("completeness"), f"{member_location}.completeness"
             )
             require_object(member, "source", member_location)
+    if "document_api" in model:
+        validate_document_api_section(model["document_api"], "document_api")
 
 
 def validate_agent_api_index(index: dict[str, Any]) -> None:
@@ -508,6 +671,40 @@ def validate_agent_api_index(index: dict[str, Any]) -> None:
             require_string(symbol, key, location)
         require_completeness(symbol.get("completeness"), f"{location}.completeness")
         require_object(symbol, "source", location)
+    if "document_api" in index:
+        validate_document_api_section(index["document_api"], "document_api")
+
+
+def validate_document_api_section(value: Any, location: str) -> None:
+    if not isinstance(value, dict):
+        raise DocumentationSchemaError(f"{location} must be an object")
+    for key in DOCUMENT_API_CATEGORIES:
+        records = value.get(key, [])
+        if not isinstance(records, list):
+            raise DocumentationSchemaError(f"{location}.{key} must be a list")
+        for index, record in enumerate(records):
+            record_location = f"{location}.{key}[{index}]"
+            if not isinstance(record, dict):
+                raise DocumentationSchemaError(f"{record_location} must be an object")
+            if "completeness" in record:
+                require_completeness(
+                    record.get("completeness"), f"{record_location}.completeness"
+                )
+            if key == "modules":
+                require_string(record, "name", record_location)
+            elif key == "symbols":
+                require_string(record, "qualified_name", record_location)
+                require_string(record, "kind", record_location)
+                require_string(record, "signature", record_location)
+            elif key == "objects":
+                require_string(record, "name", record_location)
+            elif key == "properties":
+                require_string(record, "name", record_location)
+                require_string(record, "object_type", record_location)
+            elif key == "examples":
+                require_string(record, "path", record_location)
+            elif key == "anti_patterns":
+                require_string(record, "name", record_location)
 
 
 def model_facts(payload: dict[str, Any]) -> tuple[set[str], dict[str, str]]:
@@ -567,6 +764,8 @@ def validate_curated_metadata(
     workbench_names: set[str] = set()
     gaps: list[str] = []
 
+    document_api = document_api_payload(metadata, location)
+
     for index, record in enumerate(metadata_records(metadata, "examples", location)):
         record_location = f"{location}.examples[{index}]"
         path = record.get("path")
@@ -590,6 +789,118 @@ def validate_curated_metadata(
             raise DocumentationSchemaError(f"{record_location}.name must reference a class symbol")
         for symbol_name in require_string_list(record, "symbols", record_location):
             validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+
+    for index, record in enumerate(document_api["modules"]):
+        record_location = f"{location}.document_api.modules[{index}]"
+        module_name = record.get("name")
+        if not isinstance(module_name, str) or not module_name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        if module_name not in modules:
+            raise DocumentationSchemaError(
+                f"{record_location}.name references unknown module {module_name!r}"
+            )
+        if "completeness" in record:
+            state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
+            if state in {"missing", "discovered"}:
+                gaps.append(f"document_api module {module_name}: {state}")
+
+    for index, record in enumerate(document_api["objects"]):
+        record_location = f"{location}.document_api.objects[{index}]"
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        object_type_names.add(name)
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+        require_string_list(record, "properties", record_location)
+        if "completeness" in record:
+            state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
+            if state in {"missing", "discovered"}:
+                gaps.append(f"document_api object {name}: {state}")
+
+    for index, record in enumerate(document_api["properties"]):
+        record_location = f"{location}.document_api.properties[{index}]"
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        object_type = record.get("object_type")
+        if not isinstance(object_type, str) or not object_type:
+            raise DocumentationSchemaError(
+                f"{record_location}.object_type must be a non-empty string"
+            )
+        if object_type not in object_type_names:
+            raise DocumentationSchemaError(
+                f"{record_location}.object_type references unknown object type {object_type!r}"
+            )
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+        if "completeness" in record:
+            state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
+            if state in {"missing", "discovered"}:
+                gaps.append(f"document_api property {name}: {state}")
+
+    document_example_names: set[str] = set()
+    for index, record in enumerate(document_api["examples"]):
+        record_location = f"{location}.document_api.examples[{index}]"
+        path = record.get("path")
+        if not isinstance(path, str) or not path:
+            raise DocumentationSchemaError(f"{record_location}.path must be a non-empty string")
+        document_example_names.add(path)
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+        if "required" in record:
+            require_bool(record, "required", record_location)
+        require_string_list(record, "checks", record_location)
+        if "completeness" in record:
+            state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
+            if state in {"missing", "discovered"}:
+                gaps.append(f"document_api example {path}: {state}")
+
+    anti_pattern_names: set[str] = set()
+    for index, record in enumerate(document_api["anti_patterns"]):
+        record_location = f"{location}.document_api.anti_patterns[{index}]"
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        anti_pattern_names.add(name)
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+        if "completeness" in record:
+            state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
+            if state in {"missing", "discovered"}:
+                gaps.append(f"document_api anti-pattern {name}: {state}")
+
+    for index, record in enumerate(document_api["symbols"]):
+        record_location = f"{location}.document_api.symbols[{index}]"
+        qualified_name = record.get("qualified_name")
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise DocumentationSchemaError(
+                f"{record_location}.qualified_name must be a non-empty string"
+            )
+        metadata_symbol_names.add(qualified_name)
+        validate_symbol_reference(qualified_name, symbols, f"{record_location}.qualified_name")
+        if "completeness" in record:
+            completeness = require_completeness(
+                record.get("completeness"), f"{record_location}.completeness"
+            )
+            if completeness in {"missing", "discovered"}:
+                gaps.append(f"{qualified_name}: {completeness}")
+        for example_name in require_string_list(record, "examples", record_location):
+            if example_name not in document_example_names and example_name not in example_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.examples references unknown example {example_name!r}"
+                )
+        for object_type in require_string_list(record, "objects", record_location):
+            if object_type not in object_type_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.objects references unknown object type {object_type!r}"
+                )
+        for anti_pattern in require_string_list(record, "anti_patterns", record_location):
+            if anti_pattern not in anti_pattern_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.anti_patterns references unknown anti-pattern "
+                    f"{anti_pattern!r}"
+                )
 
     for index, record in enumerate(metadata_records(metadata, "workbenches", location)):
         record_location = f"{location}.workbenches[{index}]"
@@ -662,38 +973,89 @@ def validate_curated_metadata(
 def validate_checked_examples(
     metadata_documents: list[dict[str, Any]],
     examples_path: Path | None,
+    freecad_executable: Path | None = None,
 ) -> None:
     for metadata_index, metadata in enumerate(metadata_documents):
         location = f"metadata[{metadata_index}]"
-        for index, record in enumerate(metadata_records(metadata, "examples", location)):
-            record_location = f"{location}.examples[{index}]"
-            required = bool(record.get("required", False))
-            checks = set(require_string_list(record, "checks", record_location))
-            if not required:
-                continue
-            if examples_path is None:
-                raise DocumentationSchemaError(
-                    f"{record_location} required example needs --checked-examples"
-                )
-            unsupported_checks = checks.difference({"syntax"})
-            if unsupported_checks:
-                raise DocumentationSchemaError(
-                    f"{record_location}.checks contains unsupported checks: "
-                    f"{sorted(unsupported_checks)}"
-                )
-            example = Path(record["path"])
-            path = example if example.is_absolute() else examples_path / example
-            if not path.exists():
-                raise DocumentationSchemaError(
-                    f"{record_location} required example is missing: {path}"
-                )
-            if "syntax" in checks:
-                try:
-                    ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                except SyntaxError as exc:
-                    raise DocumentationSchemaError(
-                        f"{record_location} required example failed syntax check: {exc}"
-                    ) from exc
+        top_level_examples = metadata_records(metadata, "examples", location)
+        examples = list(top_level_examples)
+        examples.extend(document_api_payload(metadata, location)["examples"])
+        for index, record in enumerate(examples):
+            nested = index >= len(top_level_examples)
+            record_location = (
+                f"{location}.document_api.examples[{index - len(top_level_examples)}]"
+                if nested
+                else f"{location}.examples[{index}]"
+            )
+            validate_checked_example(
+                record,
+                record_location,
+                examples_path,
+                freecad_executable,
+            )
+
+
+def resolve_freecad_executable(path: Path | None) -> str | None:
+    if path is not None:
+        return str(path)
+    env_value = os.environ.get("FREECAD_CMD")
+    if env_value:
+        return env_value
+    return shutil.which("FreeCADCmd") or shutil.which("freecadcmd") or shutil.which("FreeCAD")
+
+
+def validate_checked_example(
+    record: dict[str, Any],
+    record_location: str,
+    examples_path: Path | None,
+    freecad_executable: Path | None,
+) -> None:
+    required = bool(record.get("required", False))
+    checks = set(require_string_list(record, "checks", record_location))
+    if not required:
+        return
+    if examples_path is None:
+        raise DocumentationSchemaError(
+            f"{record_location} required example needs --checked-examples"
+        )
+    unsupported_checks = checks.difference({"syntax", "freecad-headless"})
+    if unsupported_checks:
+        raise DocumentationSchemaError(
+            f"{record_location}.checks contains unsupported checks: "
+            f"{sorted(unsupported_checks)}"
+        )
+    example = Path(record["path"])
+    path = example if example.is_absolute() else examples_path / example
+    if not path.exists():
+        raise DocumentationSchemaError(f"{record_location} required example is missing: {path}")
+    if "syntax" in checks:
+        try:
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError as exc:
+            raise DocumentationSchemaError(
+                f"{record_location} required example failed syntax check: {exc}"
+            ) from exc
+    if "freecad-headless" in checks:
+        executable = resolve_freecad_executable(freecad_executable)
+        if executable is None:
+            return
+        command = (
+            [sys.executable, executable, str(path)]
+            if Path(executable).suffix == ".py"
+            else [executable, str(path)]
+        )
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise DocumentationSchemaError(
+                f"{record_location} required example failed headless FreeCAD smoke "
+                f"execution with {executable}: {result.stderr.strip()}"
+            )
 
 
 def exception_records(
@@ -789,6 +1151,7 @@ def validate_documentation_inputs(
     checked_examples_path: Path | None = None,
     runtime_inventory: dict[str, Any] | None = None,
     accepted_exceptions: list[dict[str, Any]] | None = None,
+    freecad_executable: Path | None = None,
 ) -> DocumentationValidationResult:
     modules, symbols = model_facts(payload)
     metadata_documents = metadata_documents or []
@@ -802,7 +1165,7 @@ def validate_documentation_inputs(
             location=f"metadata[{index}]",
         )
         gaps.extend(metadata_gaps)
-    validate_checked_examples(metadata_documents, checked_examples_path)
+    validate_checked_examples(metadata_documents, checked_examples_path, freecad_executable)
     validate_runtime_inventory(
         runtime_inventory,
         symbols=symbols,
@@ -841,10 +1204,60 @@ def completeness_counts(model: dict[str, Any]) -> Counter[str]:
     return counts
 
 
+def document_api_completeness_counts(model: dict[str, Any]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for category, records in model.get("document_api", {}).items():
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if isinstance(record, dict):
+                counts[f"{category}:{record.get('completeness', 'unknown')}"] += 1
+    return counts
+
+
+def document_api_missing_docs(model: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for category, records in model.get("document_api", {}).items():
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            state = record.get("completeness")
+            if state not in {"missing", "discovered"}:
+                continue
+            name = record.get("qualified_name") or record.get("name") or record.get("path")
+            missing.append(f"{category}: {name}")
+    return sorted(missing)
+
+
+def document_api_missing_examples(model: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    example_paths = {
+        record.get("path")
+        for record in model.get("document_api", {}).get("examples", [])
+        if isinstance(record, dict)
+    }
+    for record in model.get("document_api", {}).get("symbols", []):
+        if not isinstance(record, dict):
+            continue
+        examples = record.get("examples", [])
+        if not isinstance(examples, list) or not examples:
+            missing.append(str(record.get("qualified_name", "")))
+            continue
+        if any(example not in example_paths for example in examples):
+            missing.append(str(record.get("qualified_name", "")))
+    return sorted(name for name in missing if name)
+
+
 def quality_report(model: dict[str, Any]) -> str:
     validate_normalized_model(model)
     counts = completeness_counts(model)
     public_stub_counts = surface_completeness_counts(model, "public-stub")
+    document_counts = document_api_completeness_counts(model)
+    document_missing_docs = document_api_missing_docs(model)
+    document_missing_examples = document_api_missing_examples(model)
+    document_entry_total = sum(document_counts.values())
     total = sum(counts.values())
 
     lines = [
@@ -868,5 +1281,28 @@ def quality_report(model: dict[str, Any]) -> str:
             lines.append(f"- `{state}`: {count}")
     else:
         lines.append("- `none`: 0")
+    lines.extend(["", "## Document API Status", ""])
+    lines.append(f"- Status: `{'present' if document_entry_total else 'absent'}`")
+    lines.append(f"- Entries: {document_entry_total}")
+    lines.append(f"- Missing docs: {len(document_missing_docs)}")
+    lines.append(f"- Missing examples: {len(document_missing_examples)}")
+    lines.extend(["", "## Document API Completeness Counts", ""])
+    if document_counts:
+        for state, count in sorted(document_counts.items()):
+            lines.append(f"- `{state}`: {count}")
+    else:
+        lines.append("- `none`: 0")
+    lines.extend(["", "## Document API Missing Docs", ""])
+    if document_missing_docs:
+        for item in document_missing_docs:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- `none`")
+    lines.extend(["", "## Document API Missing Examples", ""])
+    if document_missing_examples:
+        for item in document_missing_examples:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- `none`")
     lines.append("")
     return "\n".join(lines)
