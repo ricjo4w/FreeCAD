@@ -446,6 +446,110 @@ runpy.run_path(sys.argv[1], run_name="__main__")
             )
             self.assertEqual(runtime_validate.returncode, 0, runtime_validate.stderr)
 
+    def test_generate_docs_merges_document_api_varset_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "src"
+            source_dir.mkdir()
+            stubs_dir = self.write_public_stubs(root)
+            metadata = root / "document_api_varset.json"
+            examples_dir = root / "examples"
+            examples_dir.mkdir()
+            (examples_dir / "document_api_varset.py").write_text(
+                (REPO_ROOT / "Tools" / "typing" / "docs" / "examples" / "document_api_varset.py")
+                .read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            metadata.write_text(
+                (
+                    REPO_ROOT
+                    / "Tools"
+                    / "typing"
+                    / "docs"
+                    / "metadata"
+                    / "document_api_varset.json"
+                ).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            out_dir = root / "docs-out"
+
+            result = self.run_cli(
+                "generate-docs",
+                "--root",
+                str(root),
+                "--source-dir",
+                "src",
+                "--stubs-dir",
+                str(stubs_dir),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+                "--out-dir",
+                str(out_dir),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            normalized = json.loads(
+                (out_dir / "normalized-documentation.json").read_text(encoding="utf-8")
+            )
+            document_api = normalized["document_api"]
+            self.assertIn("App::VarSet", [record["name"] for record in document_api["objects"]])
+            self.assertIn(
+                "PanelWidth",
+                [
+                    record["name"]
+                    for record in document_api["properties"]
+                    if record["object_type"] == "App::VarSet"
+                ],
+            )
+            self.assertEqual(document_api["examples"][0]["path"], "document_api_varset.py")
+            self.assertIn(
+                "App::VarSet document object",
+                [record["name"] for record in document_api["availability"]],
+            )
+            self.assertEqual(
+                {
+                    record["name"]
+                    for record in document_api["anti_patterns"]
+                },
+                {
+                    "varset-label-expression-reference",
+                    "varset-stale-recompute-assumption",
+                },
+            )
+
+            index = json.loads((out_dir / "agent-api-index.json").read_text(encoding="utf-8"))
+            self.assertIn("availability", index["document_api"])
+            self.assertIn(
+                "App::VarSet",
+                [record["name"] for record in index["document_api"]["objects"]],
+            )
+
+            rst = (
+                out_dir / "sphinx" / "python_api" / "document-api-tracer-path.rst"
+            ).read_text(encoding="utf-8")
+            self.assertIn(".. _document-api-app--varset:", rst)
+            self.assertIn("Availability", rst)
+            self.assertIn("document_api_varset.py", rst)
+
+            report = (out_dir / "documentation-quality-report.md").read_text(encoding="utf-8")
+            self.assertIn("Document API VarSet Status", report)
+            self.assertIn("Status: `present`", report)
+            self.assertIn("Missing docs: 0", report)
+            self.assertIn("Missing examples: 0", report)
+            self.assertIn("`availability:documented`: 1", report)
+
+            validate = self.run_cli(
+                "validate-docs",
+                str(out_dir / "normalized-documentation.json"),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+            )
+            self.assertEqual(validate.returncode, 0, validate.stderr)
+
     def test_validate_docs_returns_nonzero_for_schema_violations(self):
         with tempfile.TemporaryDirectory() as tmp:
             invalid_json = Path(tmp) / "invalid.json"

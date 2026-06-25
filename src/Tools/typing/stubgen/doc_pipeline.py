@@ -44,6 +44,7 @@ DOCUMENT_API_CATEGORIES = (
     "objects",
     "properties",
     "examples",
+    "availability",
     "anti_patterns",
 )
 
@@ -535,6 +536,11 @@ def render_document_api_rst(model: dict[str, Any]) -> str:
             ("name", "object_type", "behavior", "symbols", "completeness"),
         ),
         ("Checked Recipes", "examples", ("title", "path", "symbols", "checks", "completeness")),
+        (
+            "Availability",
+            "availability",
+            ("name", "summary", "objects", "properties", "symbols", "completeness"),
+        ),
         ("Anti-Patterns", "anti_patterns", ("name", "summary", "guidance", "symbols")),
     )
     for title, key, fields in sections:
@@ -550,6 +556,9 @@ def render_document_api_rst(model: dict[str, Any]) -> str:
                 or record.get("path")
                 or key
             )
+            anchor = rst_anchor(str(label)).lower()
+            if anchor:
+                lines.extend([f".. _document-api-{anchor}:", ""])
             lines.extend(rst_heading(str(label), "~"))
             lines.extend(render_field_list(record, fields))
             path = record.get("path")
@@ -703,6 +712,8 @@ def validate_document_api_section(value: Any, location: str) -> None:
                 require_string(record, "object_type", record_location)
             elif key == "examples":
                 require_string(record, "path", record_location)
+            elif key == "availability":
+                require_string(record, "name", record_location)
             elif key == "anti_patterns":
                 require_string(record, "name", record_location)
 
@@ -765,6 +776,19 @@ def validate_curated_metadata(
     gaps: list[str] = []
 
     document_api = document_api_payload(metadata, location)
+    local_symbols = dict(symbols)
+
+    for index, record in enumerate(document_api["symbols"]):
+        record_location = f"{location}.document_api.symbols[{index}]"
+        qualified_name = record.get("qualified_name")
+        if not isinstance(qualified_name, str) or not qualified_name:
+            raise DocumentationSchemaError(
+                f"{record_location}.qualified_name must be a non-empty string"
+            )
+        kind = record.get("kind", "symbol")
+        if not isinstance(kind, str) or not kind:
+            raise DocumentationSchemaError(f"{record_location}.kind must be a non-empty string")
+        local_symbols.setdefault(qualified_name, kind)
 
     for index, record in enumerate(metadata_records(metadata, "examples", location)):
         record_location = f"{location}.examples[{index}]"
@@ -811,7 +835,7 @@ def validate_curated_metadata(
             raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
         object_type_names.add(name)
         for symbol_name in require_string_list(record, "symbols", record_location):
-            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+            validate_symbol_reference(symbol_name, local_symbols, f"{record_location}.symbols")
         require_string_list(record, "properties", record_location)
         if "completeness" in record:
             state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
@@ -833,7 +857,7 @@ def validate_curated_metadata(
                 f"{record_location}.object_type references unknown object type {object_type!r}"
             )
         for symbol_name in require_string_list(record, "symbols", record_location):
-            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+            validate_symbol_reference(symbol_name, local_symbols, f"{record_location}.symbols")
         if "completeness" in record:
             state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
             if state in {"missing", "discovered"}:
@@ -847,7 +871,7 @@ def validate_curated_metadata(
             raise DocumentationSchemaError(f"{record_location}.path must be a non-empty string")
         document_example_names.add(path)
         for symbol_name in require_string_list(record, "symbols", record_location):
-            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+            validate_symbol_reference(symbol_name, local_symbols, f"{record_location}.symbols")
         if "required" in record:
             require_bool(record, "required", record_location)
         require_string_list(record, "checks", record_location)
@@ -864,7 +888,7 @@ def validate_curated_metadata(
             raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
         anti_pattern_names.add(name)
         for symbol_name in require_string_list(record, "symbols", record_location):
-            validate_symbol_reference(symbol_name, symbols, f"{record_location}.symbols")
+            validate_symbol_reference(symbol_name, local_symbols, f"{record_location}.symbols")
         if "completeness" in record:
             state = require_completeness(record.get("completeness"), f"{record_location}.completeness")
             if state in {"missing", "discovered"}:
@@ -878,7 +902,7 @@ def validate_curated_metadata(
                 f"{record_location}.qualified_name must be a non-empty string"
             )
         metadata_symbol_names.add(qualified_name)
-        validate_symbol_reference(qualified_name, symbols, f"{record_location}.qualified_name")
+        validate_symbol_reference(qualified_name, local_symbols, f"{record_location}.qualified_name")
         if "completeness" in record:
             completeness = require_completeness(
                 record.get("completeness"), f"{record_location}.completeness"
@@ -901,6 +925,46 @@ def validate_curated_metadata(
                     f"{record_location}.anti_patterns references unknown anti-pattern "
                     f"{anti_pattern!r}"
                 )
+
+    for index, record in enumerate(document_api["availability"]):
+        record_location = f"{location}.document_api.availability[{index}]"
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            raise DocumentationSchemaError(f"{record_location}.name must be a non-empty string")
+        for symbol_name in require_string_list(record, "symbols", record_location):
+            validate_symbol_reference(symbol_name, local_symbols, f"{record_location}.symbols")
+        for object_type in require_string_list(record, "objects", record_location):
+            if object_type not in object_type_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.objects references unknown object type {object_type!r}"
+                )
+        for property_name in require_string_list(record, "properties", record_location):
+            if "." not in property_name:
+                raise DocumentationSchemaError(
+                    f"{record_location}.properties entry {property_name!r} must use "
+                    "ObjectType.Property"
+                )
+            object_type, _, prop = property_name.rpartition(".")
+            if object_type not in object_type_names:
+                raise DocumentationSchemaError(
+                    f"{record_location}.properties references unknown object type "
+                    f"{object_type!r}"
+                )
+            if not any(
+                prop == property_record.get("name")
+                and object_type == property_record.get("object_type")
+                for property_record in document_api["properties"]
+            ):
+                raise DocumentationSchemaError(
+                    f"{record_location}.properties references unknown property "
+                    f"{property_name!r}"
+                )
+        if "completeness" in record:
+            state = require_completeness(
+                record.get("completeness"), f"{record_location}.completeness"
+            )
+            if state in {"missing", "discovered"}:
+                gaps.append(f"document_api availability {name}: {state}")
 
     for index, record in enumerate(metadata_records(metadata, "workbenches", location)):
         record_location = f"{location}.workbenches[{index}]"
@@ -1250,6 +1314,67 @@ def document_api_missing_examples(model: dict[str, Any]) -> list[str]:
     return sorted(name for name in missing if name)
 
 
+def is_varset_document_api_record(category: str, record: dict[str, Any]) -> bool:
+    values = [
+        record.get("qualified_name"),
+        record.get("name"),
+        record.get("object_type"),
+        record.get("summary"),
+        record.get("behavior"),
+        record.get("guidance"),
+        record.get("path"),
+        record.get("title"),
+    ]
+    values.extend(record.get("objects", []) if isinstance(record.get("objects"), list) else [])
+    values.extend(
+        record.get("properties", []) if isinstance(record.get("properties"), list) else []
+    )
+    if category == "properties" and record.get("object_type") == "App::VarSet":
+        return True
+    return any("VarSet" in str(value) for value in values if value not in (None, ""))
+
+
+def document_api_varset_records(model: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    records: list[tuple[str, dict[str, Any]]] = []
+    for category, category_records in model.get("document_api", {}).items():
+        if not isinstance(category_records, list):
+            continue
+        for record in category_records:
+            if isinstance(record, dict) and is_varset_document_api_record(category, record):
+                records.append((category, record))
+    return records
+
+
+def document_api_varset_missing_docs(model: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for category, record in document_api_varset_records(model):
+        if record.get("completeness") not in {"missing", "discovered"}:
+            continue
+        name = record.get("qualified_name") or record.get("name") or record.get("path")
+        missing.append(f"{category}: {name}")
+    return sorted(missing)
+
+
+def document_api_varset_missing_examples(model: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    example_paths = {
+        record.get("path")
+        for record in model.get("document_api", {}).get("examples", [])
+        if isinstance(record, dict)
+    }
+    for category, record in document_api_varset_records(model):
+        if category != "symbols":
+            continue
+        examples = record.get("examples", [])
+        qualified_name = str(record.get("qualified_name", ""))
+        if not isinstance(examples, list) or not examples:
+            missing.append(qualified_name)
+            continue
+        if any(example not in example_paths for example in examples):
+            missing.append(qualified_name)
+    return sorted(name for name in missing if name)
+
+
 def quality_report(model: dict[str, Any]) -> str:
     validate_normalized_model(model)
     counts = completeness_counts(model)
@@ -1257,6 +1382,9 @@ def quality_report(model: dict[str, Any]) -> str:
     document_counts = document_api_completeness_counts(model)
     document_missing_docs = document_api_missing_docs(model)
     document_missing_examples = document_api_missing_examples(model)
+    varset_records = document_api_varset_records(model)
+    varset_missing_docs = document_api_varset_missing_docs(model)
+    varset_missing_examples = document_api_varset_missing_examples(model)
     document_entry_total = sum(document_counts.values())
     total = sum(counts.values())
 
@@ -1292,6 +1420,23 @@ def quality_report(model: dict[str, Any]) -> str:
             lines.append(f"- `{state}`: {count}")
     else:
         lines.append("- `none`: 0")
+    lines.extend(["", "## Document API VarSet Status", ""])
+    lines.append(f"- Status: `{'present' if varset_records else 'absent'}`")
+    lines.append(f"- Entries: {len(varset_records)}")
+    lines.append(f"- Missing docs: {len(varset_missing_docs)}")
+    lines.append(f"- Missing examples: {len(varset_missing_examples)}")
+    lines.extend(["", "## Document API VarSet Missing Docs", ""])
+    if varset_missing_docs:
+        for item in varset_missing_docs:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- `none`")
+    lines.extend(["", "## Document API VarSet Missing Examples", ""])
+    if varset_missing_examples:
+        for item in varset_missing_examples:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- `none`")
     lines.extend(["", "## Document API Missing Docs", ""])
     if document_missing_docs:
         for item in document_missing_docs:
