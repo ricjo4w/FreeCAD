@@ -16,7 +16,9 @@ runtime.
 
 from __future__ import annotations
 
+import ast
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,27 @@ class DocumentationSchemaError(ValueError):
     """Raised when a generated documentation JSON file violates its schema."""
 
 
+@dataclass(frozen=True)
+class StubSymbol:
+    module_name: str
+    name: str
+    qualified_name: str
+    kind: str
+    signature: str
+    summary: str
+    completeness: CompletenessState
+    source_path: str
+    source_line: int
+
+
+@dataclass(frozen=True)
+class StubModule:
+    name: str
+    source_path: str
+    source_line: int
+    symbols: tuple[StubSymbol, ...]
+
+
 def completeness_for_doc(doc: str) -> CompletenessState:
     return "documented" if doc.strip() else "missing"
 
@@ -57,7 +80,138 @@ def method_signature(method: BindingMethod) -> str:
             return "(*args)"
 
 
-def normalized_model(methods: list[BindingMethod]) -> dict[str, Any]:
+def pyi_module_name(stubs_dir: Path, path: Path) -> str:
+    relative = path.relative_to(stubs_dir)
+    parts = list(relative.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def function_has_annotations(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    arguments: list[ast.arg] = (
+        list(node.args.posonlyargs)
+        + list(node.args.args)
+        + list(node.args.kwonlyargs)
+    )
+    if node.args.vararg:
+        arguments.append(node.args.vararg)
+    if node.args.kwarg:
+        arguments.append(node.args.kwarg)
+    return node.returns is not None or any(
+        argument.annotation is not None for argument in arguments
+    )
+
+
+def function_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    text = ast.unparse(node.args)
+    returns = f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
+    return f"({text}){returns}"
+
+
+def class_signature(node: ast.ClassDef) -> str:
+    bases = [ast.unparse(base) for base in node.bases]
+    bases.extend(f"{keyword.arg}={ast.unparse(keyword.value)}" for keyword in node.keywords)
+    return f"({', '.join(bases)})" if bases else ""
+
+
+def stub_completeness(node: ast.AST) -> CompletenessState:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return "typed" if function_has_annotations(node) else "discovered"
+    return "discovered"
+
+
+def doc_summary(node: ast.AST) -> str:
+    doc = ast.get_docstring(node, clean=True)
+    return doc.splitlines()[0].strip() if doc else ""
+
+
+def public_stub_symbol(
+    *,
+    module_name: str,
+    source_path: str,
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+    parent_class: str | None = None,
+) -> StubSymbol:
+    if isinstance(node, ast.ClassDef):
+        kind = "class"
+        signature = class_signature(node)
+    else:
+        kind = "method" if parent_class else "function"
+        signature = function_signature(node)
+    name = f"{parent_class}.{node.name}" if parent_class else node.name
+    return StubSymbol(
+        module_name=module_name,
+        name=name,
+        qualified_name=f"{module_name}.{name}",
+        kind=kind,
+        signature=signature,
+        summary=doc_summary(node),
+        completeness=stub_completeness(node),
+        source_path=source_path,
+        source_line=getattr(node, "lineno", 1),
+    )
+
+
+def inventory_public_stub_modules(stubs_dir: Path) -> list[StubModule]:
+    if not stubs_dir.exists():
+        return []
+
+    modules: list[StubModule] = []
+    for path in sorted(stubs_dir.rglob("*.pyi")):
+        module_name = pyi_module_name(stubs_dir, path)
+        if not module_name:
+            continue
+        source = path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(source, filename=str(path))
+        except SyntaxError as exc:
+            raise DocumentationSchemaError(f"{path}: invalid public stub syntax: {exc}") from exc
+
+        symbols: list[StubSymbol] = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                symbols.append(
+                    public_stub_symbol(
+                        module_name=module_name,
+                        source_path=str(path),
+                        node=node,
+                    )
+                )
+            if isinstance(node, ast.ClassDef):
+                symbols.append(
+                    public_stub_symbol(
+                        module_name=module_name,
+                        source_path=str(path),
+                        node=node,
+                    )
+                )
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        symbols.append(
+                            public_stub_symbol(
+                                module_name=module_name,
+                                source_path=str(path),
+                                node=item,
+                                parent_class=node.name,
+                            )
+                        )
+
+        modules.append(
+            StubModule(
+                name=module_name,
+                source_path=str(path),
+                source_line=1,
+                symbols=tuple(symbols),
+            )
+        )
+    return modules
+
+
+def normalized_model(
+    methods: list[BindingMethod],
+    public_stub_modules: list[StubModule] | None = None,
+) -> dict[str, Any]:
     module_methods, type_methods, unknown_methods = group_methods(methods)
     modules: dict[str, list[BindingMethod]] = defaultdict(list)
 
@@ -68,8 +222,11 @@ def normalized_model(methods: list[BindingMethod]) -> dict[str, Any]:
     for context_name, group in unknown_methods.items():
         modules[f"<unknown>.{context_name}"].extend(group)
 
+    stub_modules = {module.name: module for module in public_stub_modules or []}
+    module_names = sorted(set(modules).union(stub_modules))
+
     normalized_modules: list[dict[str, Any]] = []
-    for module_name in sorted(modules):
+    for module_name in module_names:
         members = [
             {
                 "name": method.python_name,
@@ -79,19 +236,53 @@ def normalized_model(methods: list[BindingMethod]) -> dict[str, Any]:
                 "summary": method_summary(method),
                 "doc": method.doc,
                 "completeness": completeness_for_doc(method.doc),
+                "source_surface": "binding-discovery",
                 "source": {
                     "path": method.source,
                     "line": method.line,
                 },
             }
-            for method in sorted(modules[module_name], key=lambda item: (item.python_name, item.line))
+            for method in sorted(
+                modules[module_name], key=lambda item: (item.python_name, item.line)
+            )
         ]
+        for symbol in stub_modules.get(module_name, StubModule(module_name, "", 1, ())).symbols:
+            members.append(
+                {
+                    "name": symbol.name,
+                    "qualified_name": symbol.qualified_name,
+                    "kind": symbol.kind,
+                    "signature": symbol.signature,
+                    "summary": symbol.summary,
+                    "doc": "",
+                    "completeness": symbol.completeness,
+                    "source_surface": "public-stub",
+                    "source": {
+                        "path": symbol.source_path,
+                        "line": symbol.source_line,
+                    },
+                }
+            )
+        members.sort(key=lambda item: (item["qualified_name"], item["source"]["line"]))
+        stub_module = stub_modules.get(module_name)
         counts = Counter(member["completeness"] for member in members)
+        source_surface = "public-stub" if stub_module else "binding-discovery"
+        if stub_module and not members:
+            module_completeness = "discovered"
+        elif counts.get("documented", 0) == 0 and counts.get("typed", 0) == 0:
+            module_completeness = "missing"
+        else:
+            module_completeness = "partial"
         normalized_modules.append(
             {
                 "name": module_name,
                 "summary": "",
-                "completeness": "missing" if counts.get("documented", 0) == 0 else "partial",
+                "completeness": module_completeness,
+                "source_surface": source_surface,
+                "source": {
+                    "path": stub_module.source_path if stub_module else "",
+                    "line": stub_module.source_line if stub_module else 1,
+                },
                 "members": members,
             }
         )
@@ -117,6 +308,7 @@ def agent_api_index(model: dict[str, Any]) -> dict[str, Any]:
                     "signature": member["signature"],
                     "summary": member["summary"],
                     "completeness": member["completeness"],
+                    "source_surface": member.get("source_surface", "binding-discovery"),
                     "source": member["source"],
                 }
             )
@@ -162,6 +354,10 @@ def render_sphinx_rst(model: dict[str, Any], out_dir: Path) -> list[Path]:
             lines.append(f"``{member['qualified_name']}{member['signature']}``")
             lines.append("")
             lines.append(f"Completeness: ``{member['completeness']}``")
+            lines.append("")
+            lines.append(
+                f"Source surface: ``{member.get('source_surface', 'binding-discovery')}``"
+            )
             lines.append("")
             if member["summary"]:
                 lines.append(member["summary"])
@@ -260,6 +456,17 @@ def validate_agent_api_index(index: dict[str, Any]) -> None:
         require_object(symbol, "source", location)
 
 
+def surface_completeness_counts(model: dict[str, Any], source_surface: str) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for module in model.get("modules", []):
+        if module.get("source_surface") == source_surface:
+            counts[f"module:{module.get('completeness', 'unknown')}"] += 1
+        for member in module.get("members", []):
+            if member.get("source_surface") == source_surface:
+                counts[f"symbol:{member.get('completeness', 'unknown')}"] += 1
+    return counts
+
+
 def validate_documentation_json(payload: dict[str, Any]) -> None:
     schema_version = payload.get("schema_version")
     if schema_version == NORMALIZED_SCHEMA_VERSION:
@@ -282,6 +489,7 @@ def completeness_counts(model: dict[str, Any]) -> Counter[str]:
 def quality_report(model: dict[str, Any]) -> str:
     validate_normalized_model(model)
     counts = completeness_counts(model)
+    public_stub_counts = surface_completeness_counts(model, "public-stub")
     total = sum(counts.values())
 
     lines = [
@@ -299,6 +507,11 @@ def quality_report(model: dict[str, Any]) -> str:
             lines.append(f"- `{state}`: {count}")
     else:
         lines.append("- `none`: 0")
+    lines.extend(["", "## Public Stub Surface Counts", ""])
+    if public_stub_counts:
+        for state, count in sorted(public_stub_counts.items()):
+            lines.append(f"- `{state}`: {count}")
+    else:
+        lines.append("- `none`: 0")
     lines.append("")
     return "\n".join(lines)
-
