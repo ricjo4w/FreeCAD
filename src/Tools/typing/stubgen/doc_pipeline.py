@@ -25,6 +25,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from .discovery import group_methods
@@ -60,6 +61,7 @@ class DocumentationSchemaError(ValueError):
 @dataclass(frozen=True)
 class DocumentationValidationResult:
     completeness_gaps: tuple[str, ...] = ()
+    availability_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1107,15 +1109,72 @@ def runtime_exception_matches(
     )
 
 
+def runtime_availability_exception_matches(
+    exception: dict[str, Any],
+    *,
+    object_type: str,
+    property_name: str | None = None,
+    available: bool | None = None,
+) -> bool:
+    if exception.get("object_type") != object_type:
+        return False
+    expected_property = exception.get("property_name", exception.get("property"))
+    if property_name is None and expected_property not in (None, ""):
+        return False
+    if property_name is not None and expected_property not in (None, property_name):
+        return False
+    expected_available = exception.get("available")
+    return expected_available is None or expected_available == available
+
+
+def documented_document_api_objects(
+    metadata_documents: list[dict[str, Any]],
+) -> tuple[set[str], dict[tuple[str, str], dict[str, Any]]]:
+    object_types: set[str] = set()
+    properties: dict[tuple[str, str], dict[str, Any]] = {}
+    for metadata_index, metadata in enumerate(metadata_documents):
+        document_api = document_api_payload(metadata, f"metadata[{metadata_index}]")
+        for record in document_api["objects"]:
+            name = record.get("name")
+            if isinstance(name, str) and name:
+                object_types.add(name)
+        for record in document_api["properties"]:
+            object_type = record.get("object_type")
+            name = record.get("name")
+            if isinstance(object_type, str) and object_type and isinstance(name, str) and name:
+                object_types.add(object_type)
+                properties[(object_type, name)] = record
+    return object_types, properties
+
+
+def inventory_document_api_objects(runtime_inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    document_api = runtime_inventory.get("document_api", {})
+    if document_api == {}:
+        return []
+    if not isinstance(document_api, dict):
+        raise DocumentationSchemaError("runtime inventory document_api must be an object")
+    objects = document_api.get("objects", [])
+    if not isinstance(objects, list):
+        raise DocumentationSchemaError("runtime inventory document_api.objects must be a list")
+    for index, record in enumerate(objects):
+        if not isinstance(record, dict):
+            raise DocumentationSchemaError(
+                f"runtime_inventory.document_api.objects[{index}] must be an object"
+            )
+    return objects
+
+
 def validate_runtime_inventory(
     runtime_inventory: dict[str, Any] | None,
     *,
     symbols: dict[str, str],
+    metadata_documents: list[dict[str, Any]],
     exceptions: list[dict[str, Any]],
-) -> None:
+) -> tuple[str, ...]:
     if runtime_inventory is None:
-        return
-    runtime_symbols = runtime_inventory.get("symbols")
+        return ()
+    notes: list[str] = []
+    runtime_symbols = runtime_inventory.get("symbols", [])
     if not isinstance(runtime_symbols, list):
         raise DocumentationSchemaError("runtime inventory symbols must be a list")
     for index, record in enumerate(runtime_symbols):
@@ -1142,6 +1201,180 @@ def validate_runtime_inventory(
             f"{location} runtime kind {runtime_kind!r} conflicts with documented kind "
             f"{documented_kind!r} for {qualified_name!r}"
         )
+    documented_objects, documented_properties = documented_document_api_objects(
+        metadata_documents
+    )
+    for object_index, record in enumerate(inventory_document_api_objects(runtime_inventory)):
+        location = f"runtime_inventory.document_api.objects[{object_index}]"
+        object_type = record.get("name")
+        if not isinstance(object_type, str) or not object_type:
+            raise DocumentationSchemaError(f"{location}.name must be a non-empty string")
+        available = record.get("available", True)
+        if not isinstance(available, bool):
+            raise DocumentationSchemaError(f"{location}.available must be a boolean")
+        if object_type in documented_objects and not available:
+            note = f"Document API runtime availability: object {object_type} is unavailable"
+            notes.append(note)
+            if not any(
+                runtime_availability_exception_matches(
+                    exception,
+                    object_type=object_type,
+                    available=available,
+                )
+                for exception in exceptions
+            ):
+                raise DocumentationSchemaError(f"{location} {note}")
+        properties = record.get("properties", [])
+        if not isinstance(properties, list):
+            raise DocumentationSchemaError(f"{location}.properties must be a list")
+        for property_index, property_record in enumerate(properties):
+            property_location = f"{location}.properties[{property_index}]"
+            if not isinstance(property_record, dict):
+                raise DocumentationSchemaError(f"{property_location} must be an object")
+            property_name = property_record.get("name")
+            property_available = property_record.get("available", True)
+            if not isinstance(property_name, str) or not property_name:
+                raise DocumentationSchemaError(
+                    f"{property_location}.name must be a non-empty string"
+                )
+            if not isinstance(property_available, bool):
+                raise DocumentationSchemaError(f"{property_location}.available must be a boolean")
+            if (object_type, property_name) not in documented_properties:
+                continue
+            if property_available:
+                continue
+            note = (
+                "Document API runtime availability: property "
+                f"{object_type}.{property_name} is unavailable"
+            )
+            notes.append(note)
+            if any(
+                runtime_availability_exception_matches(
+                    exception,
+                    object_type=object_type,
+                    property_name=property_name,
+                    available=property_available,
+                )
+                for exception in exceptions
+            ):
+                continue
+            raise DocumentationSchemaError(f"{property_location} {note}")
+    return tuple(notes)
+
+
+def collect_document_api_runtime_inventory(
+    metadata_documents: list[dict[str, Any]],
+    *,
+    freecad_executable: Path | None = None,
+) -> dict[str, Any]:
+    executable = resolve_freecad_executable(freecad_executable)
+    if executable is None:
+        raise DocumentationSchemaError(
+            "runtime inventory collection needs --freecad-executable or FREECAD_CMD"
+        )
+    object_types, properties = documented_document_api_objects(metadata_documents)
+    expectations = [
+        {
+            "name": object_type,
+            "properties": sorted(
+                property_name
+                for candidate, property_name in properties
+                if candidate == object_type
+            ),
+        }
+        for object_type in sorted(object_types)
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        script_path = tmp_dir / "collect_document_api_runtime_inventory.py"
+        expectations_path = tmp_dir / "expectations.json"
+        output_path = tmp_dir / "runtime-inventory.json"
+        expectations_path.write_text(json.dumps(expectations), encoding="utf-8")
+        script_path.write_text(RUNTIME_INVENTORY_SCRIPT, encoding="utf-8")
+        command = (
+            [sys.executable, executable, str(script_path), str(expectations_path), str(output_path)]
+            if Path(executable).suffix == ".py"
+            else [executable, str(script_path), str(expectations_path), str(output_path)]
+        )
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise DocumentationSchemaError(
+                "runtime inventory collection failed with "
+                f"{executable}: {result.stderr.strip()}"
+            )
+        return load_json(output_path)
+
+
+RUNTIME_INVENTORY_SCRIPT = r'''
+import json
+import re
+import sys
+
+import FreeCAD
+
+
+def property_available(obj, name):
+    if hasattr(obj, name):
+        return True
+    properties = getattr(obj, "PropertiesList", [])
+    return isinstance(properties, (list, tuple)) and name in properties
+
+
+def safe_name(value):
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", value)
+    return cleaned or "Object"
+
+
+def main():
+    expectations_path, output_path = sys.argv[1:3]
+    expectations = json.loads(open(expectations_path, encoding="utf-8").read())
+    objects = []
+    doc = None
+    try:
+        doc = FreeCAD.newDocument("DocRuntimeInventory")
+        for expectation in expectations:
+            object_type = expectation["name"]
+            properties = expectation.get("properties", [])
+            record = {"name": object_type, "available": True, "properties": []}
+            try:
+                obj = doc if object_type == "App::Document" else doc.addObject(
+                    object_type, safe_name(object_type)
+                )
+            except Exception as exc:
+                record["available"] = False
+                record["error"] = str(exc)
+                obj = None
+            if obj is not None:
+                for property_name in properties:
+                    record["properties"].append(
+                        {
+                            "name": property_name,
+                            "available": property_available(obj, property_name),
+                        }
+                    )
+            objects.append(record)
+    finally:
+        if doc is not None and hasattr(FreeCAD, "closeDocument"):
+            try:
+                FreeCAD.closeDocument(getattr(doc, "Name", "DocRuntimeInventory"))
+            except Exception:
+                pass
+    payload = {
+        "schema_version": "freecad-doc-runtime-inventory-v1",
+        "document_api": {"objects": objects},
+    }
+    open(output_path, "w", encoding="utf-8").write(json.dumps(payload, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()
+'''
 
 
 def validate_documentation_inputs(
@@ -1166,12 +1399,16 @@ def validate_documentation_inputs(
         )
         gaps.extend(metadata_gaps)
     validate_checked_examples(metadata_documents, checked_examples_path, freecad_executable)
-    validate_runtime_inventory(
+    availability_notes = validate_runtime_inventory(
         runtime_inventory,
         symbols=symbols,
+        metadata_documents=metadata_documents,
         exceptions=exception_records(metadata_documents, accepted_exceptions),
     )
-    return DocumentationValidationResult(completeness_gaps=tuple(gaps))
+    return DocumentationValidationResult(
+        completeness_gaps=tuple(gaps),
+        availability_notes=availability_notes,
+    )
 
 
 def surface_completeness_counts(model: dict[str, Any], source_surface: str) -> Counter[str]:
