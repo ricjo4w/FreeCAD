@@ -76,6 +76,35 @@ def sparse(name): ...
         (stubs_dir / "Draft.pyi").write_text("", encoding="utf-8")
         return stubs_dir
 
+    def write_sketcher_public_stubs(self, root: Path) -> Path:
+        stubs_dir = self.write_public_stubs(root)
+        (stubs_dir / "Part.pyi").write_text(
+            """\
+class LineSegment:
+    ...
+
+class Circle:
+    ...
+""",
+            encoding="utf-8",
+        )
+        (stubs_dir / "Sketcher.pyi").write_text(
+            """\
+class Constraint:
+    Type: str
+    Value: float
+
+class SketchObject:
+    Name: str
+    Geometry: list[object]
+    Constraints: list[Constraint]
+    def addGeometry(self, geometry: object, construction: bool = False) -> int: ...
+    def addConstraint(self, constraint: Constraint) -> int: ...
+""",
+            encoding="utf-8",
+        )
+        return stubs_dir
+
     def write_normalized_json(self, root: Path) -> Path:
         path = root / "normalized-documentation.json"
         path.write_text(
@@ -176,13 +205,28 @@ class DocumentObject:
         self.PropertiesList = ["Name", "Label"]
 
 
+class SketchObject(DocumentObject):
+    def __init__(self, name):
+        super().__init__(name)
+        self.Geometry = []
+        self.Constraints = []
+
+    def addGeometry(self, geometry, construction=False):
+        self.Geometry.append(geometry)
+        return len(self.Geometry) - 1
+
+    def addConstraint(self, constraint):
+        self.Constraints.append(constraint)
+        return len(self.Constraints) - 1
+
+
 class Document:
     def __init__(self, name):
         self.Name = name
         self._objects = {}
 
     def addObject(self, type_id, name):
-        obj = DocumentObject(name)
+        obj = SketchObject(name) if type_id == "Sketcher::SketchObject" else DocumentObject(name)
         self._objects[name] = obj
         return obj
 
@@ -197,7 +241,36 @@ def newDocument(name):
     return Document(name)
 
 
-sys.modules["FreeCAD"] = types.SimpleNamespace(newDocument=newDocument)
+class Vector:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+
+class LineSegment:
+    def __init__(self, start, end):
+        self.StartPoint = start
+        self.EndPoint = end
+
+
+class Circle:
+    def __init__(self, center, axis, radius):
+        self.Center = center
+        self.Axis = axis
+        self.Radius = radius
+
+
+class Constraint:
+    def __init__(self, type_name, *args):
+        self.Type = type_name
+        self.Args = args
+        self.Value = args[-1] if args and isinstance(args[-1], float) else None
+
+
+sys.modules["FreeCAD"] = types.SimpleNamespace(newDocument=newDocument, Vector=Vector)
+sys.modules["Part"] = types.SimpleNamespace(LineSegment=LineSegment, Circle=Circle)
+sys.modules["Sketcher"] = types.SimpleNamespace(Constraint=Constraint)
 script_args = sys.argv[1:]
 sys.argv = script_args
 runpy.run_path(script_args[0], run_name="__main__")
@@ -481,6 +554,114 @@ runpy.run_path(script_args[0], run_name="__main__")
                 str(self.write_fake_freecad_cmd(root)),
             )
             self.assertEqual(runtime_validate.returncode, 0, runtime_validate.stderr)
+
+    def test_generate_docs_merges_sketcher_headless_workflow_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "src"
+            source_dir.mkdir()
+            stubs_dir = self.write_sketcher_public_stubs(root)
+            metadata = root / "sketcher_headless_workflow.json"
+            examples_dir = root / "examples"
+            examples_dir.mkdir()
+            (examples_dir / "sketcher_headless_workflow.py").write_text(
+                (
+                    REPO_ROOT
+                    / "Tools"
+                    / "typing"
+                    / "docs"
+                    / "examples"
+                    / "sketcher_headless_workflow.py"
+                ).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            metadata.write_text(
+                (
+                    REPO_ROOT
+                    / "Tools"
+                    / "typing"
+                    / "docs"
+                    / "metadata"
+                    / "sketcher_headless_workflow.json"
+                ).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            out_dir = root / "docs-out"
+
+            result = self.run_cli(
+                "generate-docs",
+                "--root",
+                str(root),
+                "--source-dir",
+                "src",
+                "--stubs-dir",
+                str(stubs_dir),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+                "--freecad-executable",
+                str(self.write_fake_freecad_cmd(root)),
+                "--out-dir",
+                str(out_dir),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            normalized = json.loads(
+                (out_dir / "normalized-documentation.json").read_text(encoding="utf-8")
+            )
+            sketcher = normalized["sketcher"]
+            self.assertIn("Sketcher", [record["name"] for record in sketcher["modules"]])
+            self.assertIn(
+                "Sketcher.SketchObject.addGeometry",
+                [record["qualified_name"] for record in sketcher["symbols"]],
+            )
+            self.assertIn(
+                "Sketcher::SketchObject",
+                [record["name"] for record in sketcher["objects"]],
+            )
+            self.assertIn("Geometry", [record["name"] for record in sketcher["properties"]])
+            self.assertEqual(sketcher["examples"][0]["path"], "sketcher_headless_workflow.py")
+            self.assertIn(
+                "Sketcher Workbench Guide",
+                [record["name"] for record in sketcher["workbenches"]],
+            )
+            self.assertIn(
+                "sketcher-skipped-recompute",
+                [record["name"] for record in sketcher["anti_patterns"]],
+            )
+
+            index = json.loads((out_dir / "agent-api-index.json").read_text(encoding="utf-8"))
+            self.assertIn(
+                "Sketcher.Constraint",
+                [record["qualified_name"] for record in index["sketcher"]["symbols"]],
+            )
+
+            rst = (out_dir / "sphinx" / "python_api" / "sketcher-reference.rst").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Sketcher Reference", rst)
+            self.assertIn("Sketcher Workbench Guide", rst)
+            self.assertIn("FreeCAD.Document.recompute", rst)
+
+            report = (out_dir / "documentation-quality-report.md").read_text(encoding="utf-8")
+            self.assertIn("Sketcher Status", report)
+            self.assertIn("Status: `present`", report)
+            self.assertIn("Missing docs: 0", report)
+            self.assertIn("Missing examples: 0", report)
+            self.assertIn("`workbenches:documented`: 1", report)
+
+            validate = self.run_cli(
+                "validate-docs",
+                str(out_dir / "normalized-documentation.json"),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+                "--freecad-executable",
+                str(self.write_fake_freecad_cmd(root)),
+            )
+            self.assertEqual(validate.returncode, 0, validate.stderr)
 
     def test_validate_docs_returns_nonzero_for_schema_violations(self):
         with tempfile.TemporaryDirectory() as tmp:
