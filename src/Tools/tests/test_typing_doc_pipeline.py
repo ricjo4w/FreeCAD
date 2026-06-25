@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -55,11 +56,18 @@ class TypingDocumentationPipelineCliTests(unittest.TestCase):
         (stubs_dir / "FreeCAD.pyi").write_text(
             """\
 class Document:
+    def addObject(self, type_id: str, name: str) -> DocumentObject: ...
+    def getObject(self, name: str) -> DocumentObject | None: ...
     def recompute(self, force: bool = False) -> None: ...
+
+class DocumentObject:
+    Name: str
+    Label: str
 
 class SparseType:
     ...
 
+def newDocument(name: str) -> Document: ...
 def openDocument(path: str) -> Document: ...
 def sparse(name): ...
 """,
@@ -149,6 +157,51 @@ def sparse(name): ...
     def write_metadata(self, root: Path, payload: dict) -> Path:
         path = root / "metadata.yaml"
         path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def write_fake_freecad_cmd(self, root: Path) -> Path:
+        path = root / "fake-freecad-cmd.py"
+        path.write_text(
+            """\
+#!/usr/bin/env python3
+import runpy
+import sys
+import types
+
+
+class DocumentObject:
+    def __init__(self, name):
+        self.Name = name
+        self.Label = name
+
+
+class Document:
+    def __init__(self, name):
+        self.Name = name
+        self._objects = {}
+
+    def addObject(self, type_id, name):
+        obj = DocumentObject(name)
+        self._objects[name] = obj
+        return obj
+
+    def getObject(self, name):
+        return self._objects.get(name)
+
+    def recompute(self):
+        return 1
+
+
+def newDocument(name):
+    return Document(name)
+
+
+sys.modules["FreeCAD"] = types.SimpleNamespace(newDocument=newDocument)
+runpy.run_path(sys.argv[1], run_name="__main__")
+""",
+            encoding="utf-8",
+        )
+        path.chmod(path.stat().st_mode | os.X_OK)
         return path
 
     def test_generate_docs_writes_model_index_rst_and_report(self):
@@ -269,8 +322,129 @@ def sparse(name): ...
             self.assertIn("Public Stub Surface Counts", report)
             self.assertIn("`module:discovered`: 1", report)
             self.assertIn("`module:partial`: 1", report)
-            self.assertIn("`symbol:typed`: 2", report)
-            self.assertIn("`symbol:discovered`: 3", report)
+            self.assertIn("`symbol:typed`: 5", report)
+            self.assertIn("`symbol:discovered`: 4", report)
+
+    def test_generate_docs_merges_document_api_tracer_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "src"
+            source_dir.mkdir()
+            stubs_dir = self.write_public_stubs(root)
+            metadata = root / "document_api_tracer.json"
+            examples_dir = root / "examples"
+            examples_dir.mkdir()
+            (examples_dir / "document_api_tracer.py").write_text(
+                (REPO_ROOT / "Tools" / "typing" / "docs" / "examples" / "document_api_tracer.py")
+                .read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            metadata.write_text(
+                (
+                    REPO_ROOT
+                    / "Tools"
+                    / "typing"
+                    / "docs"
+                    / "metadata"
+                    / "document_api_tracer.json"
+                ).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            out_dir = root / "docs-out"
+
+            result = self.run_cli(
+                "generate-docs",
+                "--root",
+                str(root),
+                "--source-dir",
+                "src",
+                "--stubs-dir",
+                str(stubs_dir),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+                "--out-dir",
+                str(out_dir),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            normalized = json.loads(
+                (out_dir / "normalized-documentation.json").read_text(encoding="utf-8")
+            )
+            document_api = normalized["document_api"]
+            self.assertEqual(document_api["modules"][0]["name"], "FreeCAD")
+            self.assertIn(
+                "FreeCAD.Document.addObject",
+                [record["qualified_name"] for record in document_api["symbols"]],
+            )
+            self.assertIn(
+                "Part::Box",
+                [record["name"] for record in document_api["objects"]],
+            )
+            self.assertIn(
+                "Label",
+                [record["name"] for record in document_api["properties"]],
+            )
+            self.assertEqual(document_api["examples"][0]["path"], "document_api_tracer.py")
+            self.assertEqual(
+                {
+                    record["name"]
+                    for record in document_api["anti_patterns"]
+                },
+                {
+                    "gui-command-reliance",
+                    "skipped-recompute",
+                    "label-name-confusion",
+                    "dynamic-properties-too-early",
+                },
+            )
+
+            index = json.loads((out_dir / "agent-api-index.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                next(
+                    record
+                    for record in index["document_api"]["symbols"]
+                    if record["qualified_name"] == "FreeCAD.Document.recompute"
+                )["completeness"],
+                "documented",
+            )
+
+            rst = (
+                out_dir / "sphinx" / "python_api" / "document-api-tracer-path.rst"
+            ).read_text(encoding="utf-8")
+            self.assertIn("Document API Tracer Path", rst)
+            self.assertIn("document_api_tracer.py", rst)
+            self.assertIn("skipped-recompute", rst)
+
+            report = (out_dir / "documentation-quality-report.md").read_text(encoding="utf-8")
+            self.assertIn("Document API Status", report)
+            self.assertIn("Status: `present`", report)
+            self.assertIn("Missing docs: 0", report)
+            self.assertIn("Missing examples: 0", report)
+            self.assertIn("`anti_patterns:documented`: 4", report)
+
+            validate = self.run_cli(
+                "validate-docs",
+                str(out_dir / "normalized-documentation.json"),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+            )
+            self.assertEqual(validate.returncode, 0, validate.stderr)
+
+            runtime_validate = self.run_cli(
+                "validate-docs",
+                str(out_dir / "normalized-documentation.json"),
+                "--metadata",
+                str(metadata),
+                "--checked-examples",
+                str(examples_dir),
+                "--freecad-executable",
+                str(self.write_fake_freecad_cmd(root)),
+            )
+            self.assertEqual(runtime_validate.returncode, 0, runtime_validate.stderr)
 
     def test_validate_docs_returns_nonzero_for_schema_violations(self):
         with tempfile.TemporaryDirectory() as tmp:
