@@ -71,3 +71,7 @@ tsupdate_stdout.log
 # pixi environments
 *.egg-info
 .pixi
+
+
+CONTEXT.md
+docs/adr
