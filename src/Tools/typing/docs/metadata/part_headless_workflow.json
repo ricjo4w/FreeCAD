@@ -1,0 +1,217 @@
+{
+  "source": "src/Tools/typing/docs/metadata/part_headless_workflow.json",
+  "part": {
+    "modules": [
+      {
+        "name": "Part",
+        "summary": "Part workbench module for constructing and inspecting OpenCASCADE topology in headless scripts.",
+        "canonical_reference": "src/Mod/Part/App/Part.module.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "FreeCAD",
+        "summary": "Core document module used to host Part geometry in App document objects.",
+        "canonical_reference": "src/App/Document.pyi",
+        "completeness": "documented"
+      }
+    ],
+    "symbols": [
+      {
+        "qualified_name": "FreeCAD.newDocument",
+        "summary": "Create an in-memory document before integrating Part geometry.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["App::Document"],
+        "workbenches": ["Part"],
+        "anti_patterns": ["gui-command-reliance"],
+        "canonical_reference": "src/App/ApplicationPy.cpp",
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.addObject",
+        "summary": "Create a document-integrated Part feature that can own a Shape property.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["App::Document", "Part::Feature"],
+        "workbenches": ["Part"],
+        "anti_patterns": ["transient-shape-only", "label-name-confusion"],
+        "canonical_reference": "src/App/DocumentPyImp.cpp",
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.recompute",
+        "summary": "Recompute after assigning generated Part topology to document objects.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["App::Document", "Part::Feature"],
+        "workbenches": ["Part"],
+        "anti_patterns": ["skipped-recompute"],
+        "canonical_reference": "src/App/DocumentPyImp.cpp",
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Part.makeBox",
+        "summary": "Create a box solid for scripted Part modeling workflows.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["Part.Shape"],
+        "workbenches": ["Part"],
+        "anti_patterns": [],
+        "canonical_reference": "src/Mod/Part/App/Part.module.pyi",
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Part.makeCylinder",
+        "summary": "Create a cylinder solid that can be combined with other Part topology.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["Part.Shape"],
+        "workbenches": ["Part"],
+        "anti_patterns": [],
+        "canonical_reference": "src/Mod/Part/App/Part.module.pyi",
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Part.Shape.fuse",
+        "summary": "Create a union from a base shape and one or more tool shapes.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["Part.Shape"],
+        "workbenches": ["Part"],
+        "anti_patterns": ["mutating-derived-shape-assumption"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Part.Shape.isValid",
+        "summary": "Verify generated topology before downstream document use.",
+        "examples": ["part_headless_workflow.py"],
+        "objects": ["Part.Shape"],
+        "workbenches": ["Part"],
+        "anti_patterns": ["unchecked-topology"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      }
+    ],
+    "objects": [
+      {
+        "name": "App::Document",
+        "behavior": "Owns the Part::Feature object and applies recompute so assigned shapes become observable document state.",
+        "symbols": ["FreeCAD.newDocument", "FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "properties": [],
+        "canonical_reference": "src/App/Document.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "Part::Feature",
+        "behavior": "Document object whose Shape property stores a Part.Shape for recompute-aware document integration.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "properties": ["Name", "Label", "Shape"],
+        "canonical_reference": "src/Mod/Part/App/PartFeature.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "Part.Shape",
+        "behavior": "Transient OpenCASCADE topology returned by Part factories and boolean operations before assignment to a document object.",
+        "symbols": ["Part.makeBox", "Part.makeCylinder", "Part.Shape.fuse", "Part.Shape.isValid"],
+        "properties": ["Volume", "Solids"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      }
+    ],
+    "properties": [
+      {
+        "name": "Shape",
+        "object_type": "Part::Feature",
+        "behavior": "Stores the generated Part.Shape on a document object so the model tree and recompute lifecycle can observe it.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "canonical_reference": "src/Mod/Part/App/PartFeature.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "Volume",
+        "object_type": "Part.Shape",
+        "behavior": "Derived solid volume used to verify that generated topology is non-empty and changed by operations.",
+        "symbols": ["Part.makeBox", "Part.Shape.fuse"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "Solids",
+        "object_type": "Part.Shape",
+        "behavior": "Sub-shape collection used to confirm representative solid topology exists.",
+        "symbols": ["Part.makeBox", "Part.Shape.fuse"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      }
+    ],
+    "examples": [
+      {
+        "path": "part_headless_workflow.py",
+        "title": "Create and integrate Part geometry headlessly",
+        "summary": "Creates representative Part solids, fuses them, assigns the result to a Part::Feature, recomputes, and verifies state.",
+        "symbols": ["FreeCAD.newDocument", "FreeCAD.Document.addObject", "FreeCAD.Document.recompute", "Part.makeBox", "Part.makeCylinder", "Part.Shape.fuse", "Part.Shape.isValid"],
+        "checks": ["syntax", "freecad-headless"],
+        "required": true,
+        "canonical_reference": "src/Tools/typing/docs/examples/part_headless_workflow.py",
+        "completeness": "documented"
+      }
+    ],
+    "workbenches": [
+      {
+        "name": "Part",
+        "summary": "Use the Part module for headless geometry construction, then integrate results through document objects when persistence or recompute matters.",
+        "modules": ["Part", "FreeCAD"],
+        "symbols": ["Part.makeBox", "Part.makeCylinder", "Part.Shape.fuse", "FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "objects": ["App::Document", "Part::Feature", "Part.Shape"],
+        "references": ["src/Mod/Part/App/Part.module.pyi", "src/Mod/Part/App/PartFeature.pyi", "src/Mod/Part/App/TopoShape.pyi"],
+        "canonical_reference": "src/Mod/Part/Init.py",
+        "completeness": "documented"
+      }
+    ],
+    "anti_patterns": [
+      {
+        "name": "gui-command-reliance",
+        "summary": "Do not use GUI Part commands for automation-only geometry creation.",
+        "guidance": "Call Part module factories directly so scripts run under FreeCADCmd and in non-GUI CI.",
+        "symbols": ["FreeCAD.newDocument"],
+        "canonical_reference": "src/Mod/Part/App/Part.module.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "transient-shape-only",
+        "summary": "Do not leave geometry as an unowned transient shape when the workflow expects document state.",
+        "guidance": "Assign the generated shape to a Part::Feature.Shape property and recompute when the result should participate in the document lifecycle.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "canonical_reference": "src/Mod/Part/App/PartFeature.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "skipped-recompute",
+        "summary": "Do not inspect document-integrated Part geometry before recompute.",
+        "guidance": "Call doc.recompute() after assigning Shape or mutating document object properties, then verify the resulting state.",
+        "symbols": ["FreeCAD.Document.recompute"],
+        "canonical_reference": "src/App/Document.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "unchecked-topology",
+        "summary": "Do not pass generated topology downstream without basic shape validation.",
+        "guidance": "Use shape.isValid() and simple derived-state checks such as Volume or Solids for representative smoke coverage.",
+        "symbols": ["Part.Shape.isValid"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "label-name-confusion",
+        "summary": "Do not use Label for internal document lookup.",
+        "guidance": "Use the internal Name passed to addObject with doc.getObject(); Label is user-facing and can differ.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "canonical_reference": "src/App/Document.pyi",
+        "completeness": "documented"
+      },
+      {
+        "name": "mutating-derived-shape-assumption",
+        "summary": "Do not assume Part boolean helpers mutate the original shape in place.",
+        "guidance": "Store the returned shape from operations such as fuse() and assign that returned value to the document object.",
+        "symbols": ["Part.Shape.fuse"],
+        "canonical_reference": "src/Mod/Part/App/TopoShape.pyi",
+        "completeness": "documented"
+      }
+    ]
+  }
+}
