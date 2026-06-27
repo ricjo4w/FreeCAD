@@ -2,7 +2,7 @@
 
 This module is intentionally thin. Its job is to expose a stable user-facing
 entrypoint, resolve repository-relative paths, and dispatch to the generator in
-either ``generate``, ``check``, or ``lint-docs`` mode.
+``generate``, ``check``, documentation, or ``lint-docs`` mode.
 
 Keep policy and parsing logic out of this file:
 - binding discovery belongs in ``generator``
@@ -21,6 +21,23 @@ import subprocess
 import sys
 
 from .doc_lint import lint_curated_stub_docs
+from .doc_pipeline import (
+    AGENT_INDEX_JSON_NAME,
+    NORMALIZED_JSON_NAME,
+    QUALITY_REPORT_NAME,
+    DocumentationSchemaError,
+    agent_api_index,
+    collect_document_api_runtime_inventory,
+    inventory_public_stub_modules,
+    load_json,
+    load_metadata_document,
+    normalized_model,
+    quality_report,
+    render_sphinx_rst,
+    validate_documentation_inputs,
+    validate_documentation_json,
+    write_json,
+)
 from .discovery import collect_methods, collect_type_registrations
 from .generator import (
     markdown_report,
@@ -98,6 +115,44 @@ def add_generation_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_docs_source_args(parser: argparse.ArgumentParser) -> None:
+    add_common_path_args(parser)
+    parser.add_argument(
+        "--stubs-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Generated public stub directory to inventory for documentation. "
+            f"Defaults to {DEFAULT_STUBS_OUT_DIR} when that directory exists."
+        ),
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        required=True,
+        help="Directory for generated documentation JSON, RST, and report artifacts.",
+    )
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        type=Path,
+        default=[],
+        help="Curated JSON-compatible YAML metadata file to merge into generated docs.",
+    )
+    parser.add_argument(
+        "--checked-examples",
+        type=Path,
+        default=None,
+        help="Directory containing required checked examples referenced by metadata.",
+    )
+    parser.add_argument(
+        "--freecad-executable",
+        type=Path,
+        default=None,
+        help="Optional FreeCADCmd executable for checked example smoke execution.",
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     if argv and argv[0] == "check":
         parser = argparse.ArgumentParser(
@@ -132,6 +187,106 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             ),
         )
         parser.set_defaults(command="lint-docs")
+        return parser.parse_args(argv[1:])
+
+    if argv and argv[0] == "generate-docs":
+        parser = argparse.ArgumentParser(
+            description="Generate normalized Python API documentation artifacts."
+        )
+        add_docs_source_args(parser)
+        parser.set_defaults(command="generate-docs")
+        return parser.parse_args(argv[1:])
+
+    if argv and argv[0] == "validate-docs":
+        parser = argparse.ArgumentParser(
+            description="Validate generated Python API documentation JSON."
+        )
+        parser.add_argument(
+            "json_path",
+            type=Path,
+            help="Generated documentation JSON to validate.",
+        )
+        parser.add_argument(
+            "--metadata",
+            action="append",
+            type=Path,
+            default=[],
+            help="Curated JSON-compatible YAML metadata file to validate against the JSON.",
+        )
+        parser.add_argument(
+            "--checked-examples",
+            type=Path,
+            default=None,
+            help="Directory containing required checked examples referenced by metadata.",
+        )
+        parser.add_argument(
+            "--runtime-inventory",
+            type=Path,
+            default=None,
+            help="Runtime inventory JSON used to detect documented/runtime kind conflicts.",
+        )
+        parser.add_argument(
+            "--accepted-exceptions",
+            action="append",
+            type=Path,
+            default=[],
+            help="JSON-compatible YAML file listing accepted runtime metadata exceptions.",
+        )
+        parser.add_argument(
+            "--freecad-executable",
+            type=Path,
+            default=None,
+            help="Optional FreeCADCmd executable for checked example smoke execution.",
+        )
+        parser.set_defaults(command="validate-docs")
+        return parser.parse_args(argv[1:])
+
+    if argv and argv[0] == "runtime-inventory":
+        parser = argparse.ArgumentParser(
+            description="Collect optional runtime inventory for Python API documentation."
+        )
+        parser.add_argument(
+            "--metadata",
+            action="append",
+            type=Path,
+            default=[],
+            required=True,
+            help="Curated JSON-compatible YAML metadata file to inventory at runtime.",
+        )
+        parser.add_argument(
+            "--out-file",
+            type=Path,
+            required=True,
+            help="Runtime inventory JSON output path.",
+        )
+        parser.add_argument(
+            "--freecad-executable",
+            type=Path,
+            default=None,
+            help="Optional FreeCADCmd executable used for runtime inventory collection.",
+        )
+        parser.set_defaults(command="runtime-inventory")
+        return parser.parse_args(argv[1:])
+
+    if argv and argv[0] == "report-docs":
+        parser = argparse.ArgumentParser(
+            description="Write a documentation quality report from normalized JSON."
+        )
+        parser.add_argument(
+            "normalized_json",
+            type=Path,
+            help="Normalized documentation JSON generated by generate-docs.",
+        )
+        parser.add_argument(
+            "--out-file",
+            type=Path,
+            default=None,
+            help=(
+                "Markdown report path. Defaults to documentation-quality-report.md "
+                "next to the input JSON."
+            ),
+        )
+        parser.set_defaults(command="report-docs")
         return parser.parse_args(argv[1:])
 
     parser = argparse.ArgumentParser(description=DESCRIPTION)
@@ -277,10 +432,131 @@ def run_lint_docs(args: argparse.Namespace) -> int:
     return 1
 
 
+def run_generate_docs(args: argparse.Namespace) -> int:
+    root = args.root.resolve()
+    source_dir = args.source_dir if args.source_dir.is_absolute() else root / args.source_dir
+    if not source_dir.exists():
+        print_stderr(f"source directory does not exist: {source_dir}\n")
+        return 2
+
+    out_dir = args.out_dir if args.out_dir.is_absolute() else root / args.out_dir
+    stubs_dir = resolve_optional_dir(root, args.stubs_dir, DEFAULT_STUBS_OUT_DIR)
+    methods = collect_methods(root, source_dir)
+    public_stub_modules = inventory_public_stub_modules(stubs_dir) if stubs_dir else []
+    metadata_documents = [
+        load_metadata_document(path) for path in getattr(args, "metadata", [])
+    ]
+    model = normalized_model(methods, public_stub_modules, metadata_documents)
+    validate_documentation_json(model)
+    validate_documentation_inputs(
+        model,
+        metadata_documents=metadata_documents,
+        checked_examples_path=getattr(args, "checked_examples", None),
+        freecad_executable=getattr(args, "freecad_executable", None),
+    )
+
+    index = agent_api_index(model)
+    validate_documentation_json(index)
+
+    normalized_path = out_dir / NORMALIZED_JSON_NAME
+    index_path = out_dir / AGENT_INDEX_JSON_NAME
+    report_path = out_dir / QUALITY_REPORT_NAME
+    write_json(normalized_path, model)
+    write_json(index_path, index)
+    rst_paths = render_sphinx_rst(model, out_dir)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(quality_report(model), encoding="utf-8")
+
+    print(
+        "Wrote documentation artifacts to "
+        f"{out_dir} ({len(methods)} registrations, "
+        f"{len(public_stub_modules)} public stub modules, {len(rst_paths)} RST files)"
+    )
+    return 0
+
+
+def run_validate_docs(args: argparse.Namespace) -> int:
+    try:
+        payload = load_json(args.json_path)
+        metadata_documents = [
+            load_metadata_document(path) for path in getattr(args, "metadata", [])
+        ]
+        accepted_exceptions = [
+            load_metadata_document(path)
+            for path in getattr(args, "accepted_exceptions", [])
+        ]
+        runtime_inventory = (
+            load_json(args.runtime_inventory)
+            if getattr(args, "runtime_inventory", None)
+            else None
+        )
+        result = validate_documentation_inputs(
+            payload,
+            metadata_documents=metadata_documents,
+            checked_examples_path=getattr(args, "checked_examples", None),
+            runtime_inventory=runtime_inventory,
+            accepted_exceptions=accepted_exceptions,
+            freecad_executable=getattr(args, "freecad_executable", None),
+        )
+    except DocumentationSchemaError as exc:
+        print_stderr(f"{exc}\n")
+        return 1
+
+    print(f"Validated {args.json_path}")
+    for gap in result.completeness_gaps:
+        print(f"Completeness gap: {gap}")
+    for note in result.availability_notes:
+        print(f"Availability note: {note}")
+    return 0
+
+
+def run_runtime_inventory(args: argparse.Namespace) -> int:
+    try:
+        metadata_documents = [
+            load_metadata_document(path) for path in getattr(args, "metadata", [])
+        ]
+        inventory = collect_document_api_runtime_inventory(
+            metadata_documents,
+            freecad_executable=getattr(args, "freecad_executable", None),
+        )
+    except DocumentationSchemaError as exc:
+        print_stderr(f"{exc}\n")
+        return 1
+
+    out_file = args.out_file
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    write_json(out_file, inventory)
+    print(f"Wrote runtime inventory to {out_file}")
+    return 0
+
+
+def run_report_docs(args: argparse.Namespace) -> int:
+    try:
+        model = load_json(args.normalized_json)
+        output = quality_report(model)
+    except DocumentationSchemaError as exc:
+        print_stderr(f"{exc}\n")
+        return 1
+
+    out_file = args.out_file or args.normalized_json.with_name(QUALITY_REPORT_NAME)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(output, encoding="utf-8")
+    print(f"Wrote documentation quality report to {out_file}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.command == "check":
         return run_check(args)
     if args.command == "lint-docs":
         return run_lint_docs(args)
+    if args.command == "generate-docs":
+        return run_generate_docs(args)
+    if args.command == "validate-docs":
+        return run_validate_docs(args)
+    if args.command == "runtime-inventory":
+        return run_runtime_inventory(args)
+    if args.command == "report-docs":
+        return run_report_docs(args)
     return run_generate(args)

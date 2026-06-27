@@ -1,0 +1,205 @@
+{
+  "source": "src/Tools/typing/docs/metadata/sketcher_headless_workflow.json",
+  "sketcher": {
+    "modules": [
+      {
+        "name": "FreeCAD",
+        "summary": "Core application module used to create and recompute the document that owns a Sketcher::SketchObject.",
+        "completeness": "documented"
+      },
+      {
+        "name": "Sketcher",
+        "summary": "Sketcher App module used by headless scripts to create constraint records for Sketcher::SketchObject instances.",
+        "completeness": "documented"
+      },
+      {
+        "name": "Part",
+        "summary": "Geometry module used to create curve primitives before adding them to a sketch.",
+        "completeness": "documented"
+      }
+    ],
+    "symbols": [
+      {
+        "qualified_name": "FreeCAD.newDocument",
+        "summary": "Create the document that owns the headless sketch workflow.",
+        "examples": ["sketcher_headless_workflow.py"],
+        "objects": ["App::Document"],
+        "anti_patterns": ["sketcher-gui-command-reliance"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.addObject",
+        "summary": "Create a Sketcher::SketchObject by type id and internal object name.",
+        "examples": ["sketcher_headless_workflow.py"],
+        "objects": ["App::Document", "Sketcher::SketchObject"],
+        "anti_patterns": ["sketcher-wrong-object-type"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Sketcher.SketchObject.addGeometry",
+        "summary": "Append Part geometry to a sketch and return the geometry index used by constraints.",
+        "examples": ["sketcher_headless_workflow.py"],
+        "objects": ["Sketcher::SketchObject", "Part.LineSegment", "Part.Circle"],
+        "anti_patterns": ["sketcher-unstable-geometry-index"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Sketcher.SketchObject.addConstraint",
+        "summary": "Append Sketcher.Constraint records that reference existing sketch geometry indices.",
+        "examples": ["sketcher_headless_workflow.py"],
+        "objects": ["Sketcher::SketchObject", "Sketcher.Constraint"],
+        "anti_patterns": ["sketcher-unstable-geometry-index"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "Sketcher.Constraint",
+        "summary": "Create a typed Sketcher constraint such as Horizontal, Distance, or Radius.",
+        "examples": ["sketcher_headless_workflow.py"],
+        "objects": ["Sketcher.Constraint"],
+        "anti_patterns": ["sketcher-invalid-constraint-arity"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.recompute",
+        "summary": "Recompute the document after Sketcher geometry and constraints are added.",
+        "examples": ["sketcher_headless_workflow.py"],
+        "objects": ["App::Document", "Sketcher::SketchObject"],
+        "anti_patterns": ["sketcher-skipped-recompute"],
+        "completeness": "documented"
+      }
+    ],
+    "objects": [
+      {
+        "name": "App::Document",
+        "behavior": "Owns the sketch object and exposes recompute so a headless script can validate final document state.",
+        "symbols": ["FreeCAD.newDocument", "FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "properties": [],
+        "completeness": "documented"
+      },
+      {
+        "name": "Sketcher::SketchObject",
+        "behavior": "Document object created with type id Sketcher::SketchObject; stores ordered Geometry and Constraints collections.",
+        "symbols": ["FreeCAD.Document.addObject", "Sketcher.SketchObject.addGeometry", "Sketcher.SketchObject.addConstraint"],
+        "properties": ["Name", "Geometry", "Constraints"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Sketcher.Constraint",
+        "behavior": "Constraint value object constructed in the Sketcher module and stored on Sketcher::SketchObject.Constraints.",
+        "symbols": ["Sketcher.Constraint", "Sketcher.SketchObject.addConstraint"],
+        "properties": ["Type", "Value"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Part.LineSegment",
+        "behavior": "Representative line geometry added to the sketch before horizontal and distance constraints are attached.",
+        "symbols": ["Sketcher.SketchObject.addGeometry"],
+        "properties": [],
+        "completeness": "documented"
+      },
+      {
+        "name": "Part.Circle",
+        "behavior": "Representative circular geometry added to the sketch before a radius constraint is attached.",
+        "symbols": ["Sketcher.SketchObject.addGeometry"],
+        "properties": [],
+        "completeness": "documented"
+      }
+    ],
+    "properties": [
+      {
+        "name": "Name",
+        "object_type": "Sketcher::SketchObject",
+        "behavior": "Stable internal object name supplied to Document.addObject and used by Document.getObject.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Geometry",
+        "object_type": "Sketcher::SketchObject",
+        "behavior": "Ordered geometry collection; addGeometry return values are indices into this collection.",
+        "symbols": ["Sketcher.SketchObject.addGeometry"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Constraints",
+        "object_type": "Sketcher::SketchObject",
+        "behavior": "Ordered constraint collection populated by addConstraint and verified after recompute.",
+        "symbols": ["Sketcher.SketchObject.addConstraint"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Type",
+        "object_type": "Sketcher.Constraint",
+        "behavior": "Constraint kind, such as Horizontal, Distance, or Radius.",
+        "symbols": ["Sketcher.Constraint"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Value",
+        "object_type": "Sketcher.Constraint",
+        "behavior": "Numeric value used by dimensional constraints such as Distance and Radius.",
+        "symbols": ["Sketcher.Constraint"],
+        "completeness": "documented"
+      }
+    ],
+    "examples": [
+      {
+        "path": "sketcher_headless_workflow.py",
+        "title": "Create and verify a constrained sketch headlessly",
+        "summary": "Creates a document sketch, adds line and circle geometry, attaches horizontal, distance, and radius constraints, recomputes, and verifies state.",
+        "symbols": ["FreeCAD.newDocument", "FreeCAD.Document.addObject", "Sketcher.SketchObject.addGeometry", "Sketcher.SketchObject.addConstraint", "Sketcher.Constraint", "FreeCAD.Document.recompute"],
+        "checks": ["syntax", "freecad-headless"],
+        "required": true,
+        "completeness": "documented"
+      }
+    ],
+    "workbenches": [
+      {
+        "name": "Sketcher Workbench Guide",
+        "summary": "Headless Sketcher automation starts from the Document API, then uses Part geometry and Sketcher constraint constructors without activating the GUI workbench.",
+        "modules": ["FreeCAD", "Part", "Sketcher"],
+        "symbols": ["FreeCAD.Document.addObject", "Sketcher.SketchObject.addGeometry", "Sketcher.SketchObject.addConstraint", "Sketcher.Constraint", "FreeCAD.Document.recompute"],
+        "objects": ["Sketcher::SketchObject", "Sketcher.Constraint", "Part.LineSegment", "Part.Circle"],
+        "references": ["FreeCAD.Document.addObject", "Sketcher.SketchObject.addGeometry", "Sketcher.SketchObject.addConstraint", "Sketcher.Constraint", "FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      }
+    ],
+    "anti_patterns": [
+      {
+        "name": "sketcher-gui-command-reliance",
+        "summary": "Do not activate the Sketcher GUI workbench or call Gui.runCommand in headless recipes.",
+        "guidance": "Create Sketcher::SketchObject with Document.addObject and call Sketcher App APIs directly so the recipe runs under FreeCADCmd.",
+        "symbols": ["FreeCAD.newDocument"],
+        "completeness": "documented"
+      },
+      {
+        "name": "sketcher-wrong-object-type",
+        "summary": "Do not add generic Part geometry objects when the workflow needs an editable sketch.",
+        "guidance": "Use doc.addObject(\"Sketcher::SketchObject\", name), then add Part geometry to that sketch with addGeometry.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      },
+      {
+        "name": "sketcher-unstable-geometry-index",
+        "summary": "Do not hard-code geometry indices without owning the geometry insertion order.",
+        "guidance": "Capture addGeometry return values and pass those indices to Sketcher.Constraint constructors.",
+        "symbols": ["Sketcher.SketchObject.addGeometry", "Sketcher.SketchObject.addConstraint"],
+        "completeness": "documented"
+      },
+      {
+        "name": "sketcher-invalid-constraint-arity",
+        "summary": "Do not reuse one constraint argument shape for every constraint type.",
+        "guidance": "Match constructor arguments to the selected constraint type, such as Horizontal(line_index), Distance(line_index, value), or Radius(circle_index, value).",
+        "symbols": ["Sketcher.Constraint"],
+        "completeness": "documented"
+      },
+      {
+        "name": "sketcher-skipped-recompute",
+        "summary": "Do not verify final sketch state before recomputing the owning document.",
+        "guidance": "Call doc.recompute() after geometry and constraints are added before making assertions about the workflow result.",
+        "symbols": ["FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      }
+    ]
+  }
+}
