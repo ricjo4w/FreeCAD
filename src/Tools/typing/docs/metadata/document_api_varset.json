@@ -1,0 +1,165 @@
+{
+  "source": "src/Tools/typing/docs/metadata/document_api_varset.json",
+  "document_api": {
+    "modules": [
+      {
+        "name": "FreeCAD",
+        "summary": "Core application module used to create App::VarSet parameter objects in headless documents.",
+        "completeness": "documented"
+      }
+    ],
+    "symbols": [
+      {
+        "qualified_name": "FreeCAD.Document.addObject",
+        "kind": "method",
+        "signature": "(type_id: str, name: str) -> DocumentObject",
+        "summary": "Create an App::VarSet document object by passing the App::VarSet type id.",
+        "examples": ["document_api_varset.py"],
+        "objects": ["App::VarSet"],
+        "anti_patterns": ["varset-label-expression-reference"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.DocumentObject.addProperty",
+        "kind": "method",
+        "signature": "(type: str, name: str, group: str = '', doc: str = '', attr: int = 0, read_only: bool = False, hidden: bool = False, locked: bool = False, enum_vals: list = []) -> DocumentObject",
+        "summary": "Add typed dynamic properties to a VarSet, usually in the Variables group.",
+        "examples": ["document_api_varset.py"],
+        "objects": ["App::VarSet"],
+        "anti_patterns": [],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.DocumentObject.setExpression",
+        "kind": "method",
+        "signature": "(name: str, expression: str) -> None",
+        "summary": "Bind another document object's property to a VarSet property through the expression engine.",
+        "examples": ["document_api_varset.py"],
+        "objects": ["App::VarSet", "Part::Box"],
+        "anti_patterns": ["varset-label-expression-reference"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.recompute",
+        "kind": "method",
+        "signature": "(force: bool = False) -> None",
+        "summary": "Evaluate VarSet-backed expressions and propagate the resulting property values through dependent objects.",
+        "examples": ["document_api_varset.py"],
+        "objects": ["App::Document", "App::VarSet", "Part::Box"],
+        "anti_patterns": ["varset-stale-recompute-assumption"],
+        "completeness": "documented"
+      }
+    ],
+    "objects": [
+      {
+        "name": "App::Document",
+        "behavior": "Owns the VarSet and expression consumers, and recomputes dependency updates after scripted changes.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "properties": [],
+        "completeness": "documented"
+      },
+      {
+        "name": "App::VarSet",
+        "behavior": "A document object intended to store named dynamic properties that act as shared parameters for expressions elsewhere in the document.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.DocumentObject.addProperty", "FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "properties": ["Name", "Label", "PanelWidth", "PanelHeight", "ExpressionEngine"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Part::Box",
+        "behavior": "Example expression consumer whose Length and Height properties are driven by App::VarSet parameters.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "properties": ["Length", "Height"],
+        "completeness": "documented"
+      }
+    ],
+    "properties": [
+      {
+        "name": "Name",
+        "object_type": "App::VarSet",
+        "behavior": "Stable internal object name used by expressions such as Parameters.PanelWidth.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.DocumentObject.setExpression"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Label",
+        "object_type": "App::VarSet",
+        "behavior": "User-facing label that can differ from Name and should not be used as the expression reference unless it is explicitly quoted for label references.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      },
+      {
+        "name": "PanelWidth",
+        "object_type": "App::VarSet",
+        "behavior": "Example dynamic App::PropertyFloat value stored on the VarSet and consumed by a Part::Box Length expression.",
+        "symbols": ["FreeCAD.DocumentObject.addProperty", "FreeCAD.DocumentObject.setExpression"],
+        "completeness": "documented"
+      },
+      {
+        "name": "PanelHeight",
+        "object_type": "App::VarSet",
+        "behavior": "Example dynamic App::PropertyFloat value stored on the VarSet and consumed by a Part::Box Height expression.",
+        "symbols": ["FreeCAD.DocumentObject.addProperty", "FreeCAD.DocumentObject.setExpression"],
+        "completeness": "documented"
+      },
+      {
+        "name": "ExpressionEngine",
+        "object_type": "App::VarSet",
+        "behavior": "Inherited document object expression storage that records dependencies and is evaluated during recompute.",
+        "symbols": ["FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Length",
+        "object_type": "Part::Box",
+        "behavior": "Example dependent property updated from Parameters.PanelWidth during recompute.",
+        "symbols": ["FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Height",
+        "object_type": "Part::Box",
+        "behavior": "Example dependent property updated from Parameters.PanelHeight during recompute.",
+        "symbols": ["FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      }
+    ],
+    "examples": [
+      {
+        "path": "document_api_varset.py",
+        "title": "Create a VarSet and drive object dimensions from expressions",
+        "summary": "Creates an App::VarSet, adds typed dynamic properties, references those properties from a Part::Box with setExpression, recomputes, and verifies the propagated values.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.DocumentObject.addProperty", "FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "checks": ["syntax", "freecad-headless"],
+        "required": true,
+        "completeness": "documented"
+      }
+    ],
+    "availability": [
+      {
+        "name": "App::VarSet document object",
+        "summary": "Available through Document.addObject with type id App::VarSet after the App module initializes document object types; dynamic parameters are added as properties on the object and expression consumers update on recompute.",
+        "objects": ["App::VarSet"],
+        "properties": ["App::VarSet.PanelWidth", "App::VarSet.PanelHeight", "App::VarSet.ExpressionEngine"],
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.DocumentObject.addProperty", "FreeCAD.DocumentObject.setExpression", "FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      }
+    ],
+    "anti_patterns": [
+      {
+        "name": "varset-label-expression-reference",
+        "summary": "Do not write VarSet expressions against a display Label when the recipe depends on internal object-name lookup.",
+        "guidance": "Use the VarSet Name in expressions, for example Parameters.PanelWidth. A Label such as Shared Parameters is presentation text and can be changed or duplicated.",
+        "symbols": ["FreeCAD.DocumentObject.setExpression"],
+        "completeness": "documented"
+      },
+      {
+        "name": "varset-stale-recompute-assumption",
+        "summary": "Do not assume a VarSet-backed expression consumer has updated immediately after property or expression edits.",
+        "guidance": "Call doc.recompute() after adding VarSet properties, changing parameter values, or registering expressions before reading dependent values.",
+        "symbols": ["FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      }
+    ]
+  }
+}

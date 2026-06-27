@@ -1,0 +1,118 @@
+{
+  "source": "src/Tools/typing/docs/metadata/document_api_tracer.json",
+  "document_api": {
+    "modules": [
+      {
+        "name": "FreeCAD",
+        "summary": "Core application module used to create and manage headless documents.",
+        "completeness": "documented"
+      }
+    ],
+    "symbols": [
+      {
+        "qualified_name": "FreeCAD.newDocument",
+        "summary": "Create an in-memory document for scripted workflows.",
+        "examples": ["document_api_tracer.py"],
+        "objects": ["App::Document"],
+        "anti_patterns": ["gui-command-reliance"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.addObject",
+        "summary": "Create a document object by type id and internal object name.",
+        "examples": ["document_api_tracer.py"],
+        "objects": ["App::Document", "Part::Box"],
+        "anti_patterns": ["label-name-confusion", "dynamic-properties-too-early"],
+        "completeness": "documented"
+      },
+      {
+        "qualified_name": "FreeCAD.Document.recompute",
+        "summary": "Recompute the document after scripted object and property mutations.",
+        "examples": ["document_api_tracer.py"],
+        "objects": ["App::Document"],
+        "anti_patterns": ["skipped-recompute"],
+        "completeness": "documented"
+      }
+    ],
+    "objects": [
+      {
+        "name": "App::Document",
+        "behavior": "Owns document objects, resolves internal object names, and applies recompute to make scripted changes observable.",
+        "symbols": ["FreeCAD.newDocument", "FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "properties": [],
+        "completeness": "documented"
+      },
+      {
+        "name": "Part::Box",
+        "behavior": "A document object with dynamic Part workbench properties such as Length after it is added to a document.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "properties": ["Name", "Label", "Length"],
+        "completeness": "documented"
+      }
+    ],
+    "properties": [
+      {
+        "name": "Name",
+        "object_type": "Part::Box",
+        "behavior": "Stable internal object identifier supplied to addObject and used by getObject.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Label",
+        "object_type": "Part::Box",
+        "behavior": "User-facing label that may differ from the internal Name.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      },
+      {
+        "name": "Length",
+        "object_type": "Part::Box",
+        "behavior": "Dynamic box dimension property set before recompute and verified afterwards.",
+        "symbols": ["FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      }
+    ],
+    "examples": [
+      {
+        "path": "document_api_tracer.py",
+        "title": "Create a document object and recompute it headlessly",
+        "summary": "Creates a document, adds a Part::Box, sets Label and Length, recomputes, and verifies the object state.",
+        "symbols": ["FreeCAD.newDocument", "FreeCAD.Document.addObject", "FreeCAD.Document.recompute"],
+        "checks": ["syntax", "freecad-headless"],
+        "required": true,
+        "completeness": "documented"
+      }
+    ],
+    "anti_patterns": [
+      {
+        "name": "gui-command-reliance",
+        "summary": "Do not depend on Gui.runCommand for headless document construction.",
+        "guidance": "Use the Document API directly so examples run under FreeCADCmd and in automation.",
+        "symbols": ["FreeCAD.newDocument"],
+        "completeness": "documented"
+      },
+      {
+        "name": "skipped-recompute",
+        "summary": "Do not inspect derived document state before recompute.",
+        "guidance": "Call doc.recompute() after object creation and property mutation before verifying final state.",
+        "symbols": ["FreeCAD.Document.recompute"],
+        "completeness": "documented"
+      },
+      {
+        "name": "label-name-confusion",
+        "summary": "Do not use Label when a lookup needs the internal Name.",
+        "guidance": "Pass the internal object Name to doc.getObject(); Label is user-facing and may not be unique.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      },
+      {
+        "name": "dynamic-properties-too-early",
+        "summary": "Do not assume workbench-specific properties exist before the object is created.",
+        "guidance": "Create the object with addObject first, then set dynamic properties such as Length.",
+        "symbols": ["FreeCAD.Document.addObject"],
+        "completeness": "documented"
+      }
+    ]
+  }
+}
